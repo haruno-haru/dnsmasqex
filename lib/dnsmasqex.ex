@@ -4,10 +4,9 @@
 #
 defmodule Dnsmasqex do
   @moduledoc """
-  Serve DHCP and DNS with dnsmasq on an interface of another technology
+  Run dnsmasq on an interface managed by another technology
 
-  Set `:technology` to the technology that manages the interface and add the
-  `:dnsmasq` options described in `Dnsmasqex.Config`:
+  See `Dnsmasqex.Config` for the `:dnsmasq` options.
 
   ```elixir
   %{

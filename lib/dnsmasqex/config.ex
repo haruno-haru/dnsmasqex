@@ -4,24 +4,14 @@
 #
 defmodule Dnsmasqex.Config do
   @moduledoc """
-  Run dnsmasq as the DHCP and DNS server on a static IPv4 interface
+  dnsmasq options for a static IPv4 interface
 
-  This follows `VintageNet.IP.DhcpdConfig` and `VintageNet.IP.DnsdConfig`.
-  Unlike dnsd, dnsmasq forwards names it doesn't know to the name servers in
-  `/etc/resolv.conf`, so clients can use it as their only DNS server.
+  * `:start` and `:end` - DHCP address range. Omit them for DNS only
+  * `:lease_time` - seconds or `:infinite`
+  * `:static_leases` - `{mac, ip}` pairs with infinite leases
+  * `:records` - `{name, ip}` pairs, including their subdomains
 
-  The `:dnsmasq` key supports:
-
-  * `:start` and `:end` - the DHCP address range. Without them, dnsmasq only
-    serves DNS
-  * `:lease_time` - seconds or `:infinite`. Defaults to dnsmasq's 1 hour
-  * `:static_leases` - `{mac, ip}` pairs that always get the same address,
-    with an infinite lease
-  * `:records` - `{name, ip}` pairs answered locally, including subdomains
-
-  Leases are published to `["interface", ifname, "dhcpd", "leases"]` in the
-  same shape as udhcpd's, except that `:leasetime` is `:infinity` for
-  infinite leases.
+  Other names are forwarded to the name servers in `/etc/resolv.conf`.
   """
 
   alias VintageNet.Interface.RawConfig
