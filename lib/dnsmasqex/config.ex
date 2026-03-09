@@ -26,8 +26,8 @@ defmodule Dnsmasqex.Config do
     new_dnsmasq =
       dnsmasq
       |> Map.take([:start, :end, :lease_time, :static_leases, :records])
-      |> normalize_ip(:start)
-      |> normalize_ip(:end)
+      |> Map.replace_lazy(:start, &IP.ip_to_tuple!/1)
+      |> Map.replace_lazy(:end, &IP.ip_to_tuple!/1)
       |> Map.update(:static_leases, [], &normalize_pairs/1)
       |> Map.update(:records, [], &normalize_pairs/1)
 
@@ -38,13 +38,6 @@ defmodule Dnsmasqex.Config do
   def normalize(config), do: config
 
   defp normalize_pairs(pairs), do: Enum.map(pairs, fn {key, ip} -> {key, IP.ip_to_tuple!(ip)} end)
-
-  defp normalize_ip(dnsmasq, key) do
-    case dnsmasq do
-      %{^key => ip} -> %{dnsmasq | key => IP.ip_to_tuple!(ip)}
-      _ -> dnsmasq
-    end
-  end
 
   @doc """
   Add the dnsmasq configuration file and daemon
@@ -61,12 +54,12 @@ defmodule Dnsmasqex.Config do
     notify_name = "dnsmasqex_#{ifname}"
 
     contents =
-      dnsmasq_contents(dnsmasq,
+      dnsmasq_contents(dnsmasq, %{
         ifname: ifname,
         address: address,
         pid_path: Path.join(tmpdir, "dnsmasq.#{ifname}.pid"),
         lease_path: lease_path
-      )
+      })
 
     notifier =
       Supervisor.child_spec(
@@ -96,18 +89,21 @@ defmodule Dnsmasqex.Config do
 
   def add_config(raw_config, _config_without_dnsmasq, _opts), do: raw_config
 
-  @doc false
-  @spec dnsmasq_contents(map(), keyword()) :: String.t()
-  def dnsmasq_contents(dnsmasq, opts) do
+  defp dnsmasq_contents(dnsmasq, %{
+         ifname: ifname,
+         address: address,
+         pid_path: pid_path,
+         lease_path: lease_path
+       }) do
     [
-      "interface=#{opts[:ifname]}",
+      "interface=#{ifname}",
       "except-interface=lo",
-      "listen-address=#{IP.ip_to_string(opts[:address])}",
+      "listen-address=#{IP.ip_to_string(address)}",
       "bind-interfaces",
       "no-hosts",
       "user=root",
-      "pid-file=#{opts[:pid_path]}",
-      "dhcp-leasefile=#{opts[:lease_path]}",
+      "pid-file=#{pid_path}",
+      "dhcp-leasefile=#{lease_path}",
       "dhcp-script=#{BEAMNotify.bin_path()}",
       dhcp_range(dnsmasq),
       Enum.map(dnsmasq.static_leases, fn {mac, ip} ->
@@ -120,15 +116,15 @@ defmodule Dnsmasqex.Config do
   end
 
   defp dhcp_range(%{start: first, end: last} = dnsmasq) do
-    "dhcp-range=#{IP.ip_to_string(first)},#{IP.ip_to_string(last)}" <>
-      lease_time(dnsmasq[:lease_time])
+    fields = [IP.ip_to_string(first), IP.ip_to_string(last) | lease_time(dnsmasq[:lease_time])]
+    "dhcp-range=" <> Enum.join(fields, ",")
   end
 
   defp dhcp_range(_dns_only), do: []
 
-  defp lease_time(nil), do: ""
-  defp lease_time(:infinite), do: ",infinite"
-  defp lease_time(seconds), do: ",#{seconds}"
+  defp lease_time(nil), do: []
+  defp lease_time(:infinite), do: ["infinite"]
+  defp lease_time(seconds), do: [Integer.to_string(seconds)]
 
   @doc false
   @spec dnsmasq_path() :: String.t()

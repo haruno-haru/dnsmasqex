@@ -42,10 +42,13 @@ defmodule Dnsmasqex.Leases do
         leasetime: leasetime(expiry, now),
         lease_nip: ip,
         lease_mac: mac,
-        hostname: if(hostname == "*", do: "", else: hostname)
+        hostname: hostname(hostname)
       }
     end
   end
+
+  defp hostname("*"), do: ""
+  defp hostname(hostname), do: hostname
 
   defp leasetime(0, _now), do: :infinity
   defp leasetime(expiry, now), do: max(expiry - now, 0)

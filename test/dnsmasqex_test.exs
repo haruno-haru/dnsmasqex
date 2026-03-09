@@ -82,6 +82,14 @@ defmodule DnsmasqexTest do
     assert contents =~ "address=/device.example.com/192.168.24.1"
   end
 
+  test "supports infinite leases" do
+    config = put_in(@config, [:dnsmasq, :lease_time], :infinite)
+    raw_config = Dnsmasqex.to_raw_config("eth1", config, tmpdir: "/tmp/vintage_net")
+
+    [{_path, contents}] = raw_config.files
+    assert contents =~ "dhcp-range=192.168.24.10,192.168.24.99,infinite\n"
+  end
+
   test "drops dnsmasq when the interface isn't static" do
     config = %{@config | ipv4: %{method: :dhcp}}
     raw_config = Dnsmasqex.to_raw_config("eth1", config, tmpdir: "/tmp/vintage_net")

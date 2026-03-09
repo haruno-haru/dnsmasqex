@@ -37,11 +37,13 @@ defmodule Dnsmasqex do
   @impl VintageNet.Technology
   def to_raw_config(ifname, %{type: __MODULE__, technology: technology} = config, opts) do
     normalized_config = normalize(config)
+    raw_config = technology.to_raw_config(ifname, %{normalized_config | type: technology}, opts)
 
-    ifname
-    |> technology.to_raw_config(%{normalized_config | type: technology}, opts)
-    |> Map.merge(%{type: __MODULE__, source_config: normalized_config})
-    |> Config.add_config(normalized_config, opts)
+    Config.add_config(
+      %{raw_config | type: __MODULE__, source_config: normalized_config},
+      normalized_config,
+      opts
+    )
   end
 
   @impl VintageNet.Technology
@@ -52,10 +54,12 @@ defmodule Dnsmasqex do
 
   @impl VintageNet.Technology
   def check_system(_opts) do
-    if System.find_executable(Config.dnsmasq_path()) do
+    dnsmasq = Config.dnsmasq_path()
+
+    if System.find_executable(dnsmasq) do
       :ok
     else
-      {:error, "Can't find #{Config.dnsmasq_path()}"}
+      {:error, "Can't find #{dnsmasq}"}
     end
   end
 end
