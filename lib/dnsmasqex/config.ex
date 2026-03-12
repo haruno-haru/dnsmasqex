@@ -16,6 +16,7 @@ defmodule Dnsmasqex.Config do
 
   alias VintageNet.Interface.RawConfig
   alias VintageNet.IP
+  alias Dnsmasqex.Daemon
   alias Dnsmasqex.Leases
 
   @doc """
@@ -26,10 +27,12 @@ defmodule Dnsmasqex.Config do
     new_dnsmasq =
       dnsmasq
       |> Map.take([:start, :end, :lease_time, :static_leases, :records])
+      |> check_range()
+      |> check_lease_time()
       |> Map.replace_lazy(:start, &IP.ip_to_tuple!/1)
       |> Map.replace_lazy(:end, &IP.ip_to_tuple!/1)
-      |> Map.update(:static_leases, [], &normalize_pairs/1)
-      |> Map.update(:records, [], &normalize_pairs/1)
+      |> Map.update(:static_leases, [], fn leases -> Enum.map(leases, &normalize_lease/1) end)
+      |> Map.update(:records, [], fn records -> Enum.map(records, &normalize_record/1) end)
 
     %{config | dnsmasq: new_dnsmasq}
   end
@@ -37,7 +40,40 @@ defmodule Dnsmasqex.Config do
   def normalize(%{dnsmasq: _not_static} = config), do: Map.drop(config, [:dnsmasq])
   def normalize(config), do: config
 
-  defp normalize_pairs(pairs), do: Enum.map(pairs, fn {key, ip} -> {key, IP.ip_to_tuple!(ip)} end)
+  defp check_range(%{start: _, end: _} = dnsmasq), do: dnsmasq
+
+  defp check_range(%{start: _} = dnsmasq),
+    do: raise(ArgumentError, "dnsmasq :start needs an :end in #{inspect(dnsmasq)}")
+
+  defp check_range(%{end: _} = dnsmasq),
+    do: raise(ArgumentError, "dnsmasq :end needs a :start in #{inspect(dnsmasq)}")
+
+  defp check_range(dnsmasq), do: dnsmasq
+
+  defp check_lease_time(%{lease_time: lease_time} = dnsmasq)
+       when lease_time == :infinite or (is_integer(lease_time) and lease_time > 0),
+       do: dnsmasq
+
+  defp check_lease_time(%{lease_time: lease_time}),
+    do: raise(ArgumentError, "Invalid dnsmasq :lease_time #{inspect(lease_time)}")
+
+  defp check_lease_time(dnsmasq), do: dnsmasq
+
+  defp normalize_lease({mac, ip}) do
+    if is_binary(mac) and mac =~ ~r/\A[[:xdigit:]]{2}(:[[:xdigit:]]{2}){5}\z/ do
+      {mac, IP.ip_to_tuple!(ip)}
+    else
+      raise ArgumentError, "Invalid MAC address #{inspect(mac)}"
+    end
+  end
+
+  defp normalize_record({name, ip}) do
+    if is_binary(name) and name =~ ~r/\A[^\s\/#]+\z/ do
+      {name, IP.ip_to_tuple!(ip)}
+    else
+      raise ArgumentError, "Invalid dnsmasq record name #{inspect(name)}"
+    end
+  end
 
   @doc """
   Add the dnsmasq configuration file and daemon
@@ -70,11 +106,14 @@ defmodule Dnsmasqex.Config do
 
     daemon =
       Supervisor.child_spec(
-        {MuonTrap.Daemon,
-         [
-           dnsmasq_path(),
-           ["-k", "-C", conf_path, "--log-facility=-"],
-           [env: BEAMNotify.env(name: notify_name), stderr_to_stdout: true, log_output: :debug]
+        {Daemon,
+         ifname: ifname,
+         command: dnsmasq_path(),
+         args: ["-k", "-C", conf_path, "--log-facility=-"],
+         opts: [
+           env: BEAMNotify.env(name: notify_name),
+           stderr_to_stdout: true,
+           log_output: :debug
          ]},
         id: :dnsmasq
       )

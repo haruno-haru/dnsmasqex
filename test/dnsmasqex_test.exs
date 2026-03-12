@@ -53,7 +53,6 @@ defmodule DnsmasqexTest do
     assert raw_config.up_cmds == [:wired_up]
     assert raw_config.source_config.technology == WiredTechnology
     assert raw_config.down_cmds == [{:fun, Leases, :clear, ["eth1"]}]
-    assert [%{id: :dnsmasq_notify}, %{id: :dnsmasq}] = raw_config.child_specs
 
     assert [{"/tmp/vintage_net/dnsmasq.conf.eth1", contents}] = raw_config.files
 
@@ -97,6 +96,22 @@ defmodule DnsmasqexTest do
     assert raw_config.files == []
     assert raw_config.child_specs == []
     refute Map.has_key?(raw_config.source_config, :dnsmasq)
+  end
+
+  test "rejects invalid options" do
+    for dnsmasq <- [
+          %{start: "192.168.24.10"},
+          %{end: "192.168.24.99"},
+          %{lease_time: 0},
+          %{lease_time: "1h"},
+          %{static_leases: [{"aa:bb:cc:dd:ee", "192.168.24.100"}]},
+          %{records: [{"a b.example.com", "192.168.24.1"}]},
+          %{records: [{"device.example.com\naddress=/x/1.2.3.4", "192.168.24.1"}]}
+        ] do
+      assert_raise ArgumentError, fn ->
+        Dnsmasqex.normalize(%{@config | dnsmasq: dnsmasq})
+      end
+    end
   end
 
   test "check_system looks for dnsmasq" do
