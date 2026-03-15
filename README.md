@@ -50,6 +50,7 @@ The following fields are supported:
 
 ## Properties
 
-Property       | Values        | Description
--------------- | ------------- | -----------
-`dhcpd/leases` | `[%{}, ...]`  | Current leases, in the same format as VintageNet's `:dhcpd`. `leasetime` is `:infinity` for infinite leases
+Property        | Values                      | Description
+--------------- | --------------------------- | -----------
+`dhcpd/leases`  | `[%{}, ...]`                | Current leases, in the same format as VintageNet's `:dhcpd`. `leasetime` is `:infinity` for infinite leases
+`dnsmasq/event` | `%Dnsmasqex.Event{}` | The latest lease or neighbor event. See `Dnsmasqex.Event`

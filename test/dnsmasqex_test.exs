@@ -7,6 +7,7 @@ defmodule DnsmasqexTest do
 
   alias VintageNet.Interface.RawConfig
   alias Dnsmasqex.Leases
+  alias Dnsmasqex.Notifications
 
   defmodule WiredTechnology do
     @moduledoc false
@@ -52,7 +53,7 @@ defmodule DnsmasqexTest do
     assert raw_config.type == Dnsmasqex
     assert raw_config.up_cmds == [:wired_up]
     assert raw_config.source_config.technology == WiredTechnology
-    assert raw_config.down_cmds == [{:fun, Leases, :clear, ["eth1"]}]
+    assert raw_config.down_cmds == [{:fun, Notifications, :clear, ["eth1"]}]
 
     assert [{"/tmp/vintage_net/dnsmasq.conf.eth1", contents}] = raw_config.files
 
@@ -66,6 +67,8 @@ defmodule DnsmasqexTest do
            pid-file=/tmp/vintage_net/dnsmasq.eth1.pid
            dhcp-leasefile=/tmp/vintage_net/dnsmasq.eth1.leases
            dhcp-script=#{BEAMNotify.bin_path()}
+           script-arp
+           script-on-renewal
            dhcp-range=192.168.24.10,192.168.24.99,3600
            dhcp-host=aa:bb:cc:dd:ee:ff,192.168.24.100,infinite
            address=/device.example.com/192.168.24.1

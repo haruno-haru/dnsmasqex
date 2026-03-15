@@ -17,7 +17,7 @@ defmodule Dnsmasqex.Config do
   alias VintageNet.Interface.RawConfig
   alias VintageNet.IP
   alias Dnsmasqex.Daemon
-  alias Dnsmasqex.Leases
+  alias Dnsmasqex.Notifications
 
   @doc """
   Normalize the `:dnsmasq` options
@@ -81,7 +81,10 @@ defmodule Dnsmasqex.Config do
   @spec add_config(RawConfig.t(), map(), keyword()) :: RawConfig.t()
   def add_config(
         %RawConfig{ifname: ifname} = raw_config,
-        %{ipv4: %{method: :static, address: address}, dnsmasq: dnsmasq},
+        %{
+          ipv4: %{method: :static, address: address, prefix_length: prefix_length},
+          dnsmasq: dnsmasq
+        },
         opts
       ) do
     tmpdir = Keyword.fetch!(opts, :tmpdir)
@@ -97,10 +100,17 @@ defmodule Dnsmasqex.Config do
         lease_path: lease_path
       })
 
+    context = %{
+      ifname: ifname,
+      address: address,
+      prefix_length: prefix_length,
+      lease_path: lease_path
+    }
+
     notifier =
       Supervisor.child_spec(
         {BEAMNotify,
-         name: notify_name, dispatcher: fn _args, _env -> Leases.update(ifname, lease_path) end},
+         name: notify_name, report_env: true, dispatcher: &Notifications.dispatch(&1, &2, context)},
         id: :dnsmasq_notify
       )
 
@@ -122,7 +132,7 @@ defmodule Dnsmasqex.Config do
       raw_config
       | files: [{conf_path, contents} | raw_config.files],
         child_specs: raw_config.child_specs ++ [notifier, daemon],
-        down_cmds: raw_config.down_cmds ++ [{:fun, Leases, :clear, [ifname]}]
+        down_cmds: raw_config.down_cmds ++ [{:fun, Notifications, :clear, [ifname]}]
     }
   end
 
@@ -144,6 +154,8 @@ defmodule Dnsmasqex.Config do
       "pid-file=#{pid_path}",
       "dhcp-leasefile=#{lease_path}",
       "dhcp-script=#{BEAMNotify.bin_path()}",
+      "script-arp",
+      "script-on-renewal",
       dhcp_range(dnsmasq),
       Enum.map(dnsmasq.static_leases, fn {mac, ip} ->
         "dhcp-host=#{mac},#{IP.ip_to_string(ip)},infinite"
