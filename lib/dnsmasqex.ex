@@ -47,6 +47,18 @@ defmodule Dnsmasqex do
   end
 
   @impl VintageNet.Technology
+  def ioctl(ifname, :static_leases, [leases]) when is_list(leases) do
+    hosts = Config.hosts_contents(Config.normalize_static_leases(leases))
+
+    with :ok <- File.write(Config.hosts_path(tmpdir(), ifname), hosts) do
+      reload(ifname)
+    end
+  rescue
+    e in ArgumentError -> {:error, Exception.message(e)}
+  end
+
+  def ioctl(ifname, :reload, _args), do: reload(ifname)
+
   def ioctl(ifname, command, args) do
     %{technology: technology} = VintageNet.get_configuration(ifname)
     technology.ioctl(ifname, command, args)
@@ -62,4 +74,16 @@ defmodule Dnsmasqex do
       {:error, "Can't find #{dnsmasq}"}
     end
   end
+
+  defp reload(ifname) do
+    with {:ok, pid} <- File.read(Config.pid_path(tmpdir(), ifname)),
+         {_output, 0} <- System.cmd("kill", ["-HUP", String.trim(pid)], stderr_to_stdout: true) do
+      :ok
+    else
+      {:error, _reason} = error -> error
+      {output, _status} -> {:error, String.trim(output)}
+    end
+  end
+
+  defp tmpdir(), do: Application.fetch_env!(:vintage_net, :tmpdir)
 end

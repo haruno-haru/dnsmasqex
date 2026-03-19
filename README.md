@@ -45,8 +45,28 @@ The following fields are supported:
 
 * `:start` and `:end` - DHCP address range. Omit them for DNS only
 * `:lease_time` - seconds or `:infinite`
-* `:static_leases` - `{mac, ip}` pairs with infinite leases
+* `:static_leases` - `{mac, ip}` or `{mac, ip, hostname}` tuples with infinite
+  leases
 * `:records` - `{name, ip}` pairs, including their subdomains
+* `:hosts_dir` - a directory of `dhcp-host` files. New files are read
+  automatically
+
+## Changing leases at runtime
+
+To change the static leases without reconfiguring the interface, run:
+
+```elixir
+VintageNet.ioctl("eth1", :static_leases, [[{"aa:bb:cc:dd:ee:ff", "192.168.24.100"}]])
+```
+
+dnsmasq reads new files in `:hosts_dir` on its own. After changing or removing
+one, run:
+
+```elixir
+VintageNet.ioctl("eth1", :reload)
+```
+
+The configured static leases apply again when the interface is reconfigured.
 
 ## Properties
 
