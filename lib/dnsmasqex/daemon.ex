@@ -3,24 +3,17 @@
 # SPDX-License-Identifier: Apache-2.0
 #
 defmodule Dnsmasqex.Daemon do
-  @moduledoc """
-  Wrap MuonTrap.Daemon to restart a program with a backoff when it exits
+  @moduledoc false
 
-  This keeps a program that keeps exiting from exhausting its supervisors. The
-  wait starts at 1 second, doubles up to 30 seconds, and resets once the program
-  has run for 30 seconds.
-
-  ```
-  {Dnsmasqex.Daemon, ifname: ifname, command: program, args: arguments, opts: options}
-  ```
-  """
+  # Wraps MuonTrap.Daemon so that a program that keeps exiting backs off instead
+  # of exhausting its supervisors and taking VintageNet down with them
   use GenServer
   require Logger
 
   @min_backoff 1_000
   @max_backoff 30_000
+  @reset_after 30_000
 
-  @typedoc false
   @type init_args :: [
           ifname: VintageNet.ifname(),
           command: binary(),
@@ -31,9 +24,6 @@ defmodule Dnsmasqex.Daemon do
   @enforce_keys [:ifname, :command, :args]
   defstruct [:ifname, :command, :args, :pid, :started_at, opts: [], backoff: @min_backoff]
 
-  @doc """
-  Start the Daemon
-  """
   @spec start_link(init_args()) :: GenServer.on_start()
   def start_link(init_args) do
     GenServer.start_link(__MODULE__, init_args)
@@ -43,25 +33,20 @@ defmodule Dnsmasqex.Daemon do
   def init(init_args) do
     Process.flag(:trap_exit, true)
     state = struct!(__MODULE__, init_args)
-    {:ok, state, {:continue, :continue}}
+    {:ok, state, {:continue, :start}}
   end
 
   @impl GenServer
-  def handle_continue(:continue, state), do: {:noreply, start_daemon(state)}
+  def handle_continue(:start, state), do: {:noreply, start_daemon(state)}
 
   @impl GenServer
   def handle_info(:restart, state), do: {:noreply, start_daemon(state)}
 
-  def handle_info({:EXIT, pid, reason}, %{pid: pid} = state) do
-    {:noreply, schedule_restart(state, reason)}
-  end
+  def handle_info({:EXIT, pid, reason}, %{pid: pid} = state),
+    do: {:noreply, schedule_restart(state, reason)}
 
-  @impl GenServer
-  def terminate(_reason, %{pid: pid}) when is_pid(pid) do
-    if Process.alive?(pid), do: GenServer.stop(pid)
-  end
-
-  def terminate(_reason, _state), do: :ok
+  # Before OTP 26, a failed start_link also sends the exit of the process that failed
+  def handle_info({:EXIT, _pid, _reason}, state), do: {:noreply, state}
 
   defp start_daemon(state) do
     Logger.debug("[dnsmasqex(#{state.ifname})] starting #{state.command}")
@@ -86,5 +71,5 @@ defmodule Dnsmasqex.Daemon do
   defp ran_long_enough?(%{started_at: nil}), do: false
 
   defp ran_long_enough?(%{started_at: started_at}),
-    do: System.monotonic_time(:millisecond) - started_at >= @max_backoff
+    do: System.monotonic_time(:millisecond) - started_at >= @reset_after
 end
