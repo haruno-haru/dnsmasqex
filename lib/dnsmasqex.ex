@@ -27,6 +27,9 @@ defmodule Dnsmasqex do
   alias Dnsmasqex.Config
 
   @impl VintageNet.Technology
+  def normalize(%{type: __MODULE__, technology: __MODULE__}),
+    do: raise(ArgumentError, "Dnsmasqex can't wrap itself")
+
   def normalize(%{type: __MODULE__, technology: technology} = config) do
     %{config | type: technology}
     |> technology.normalize()
@@ -34,9 +37,12 @@ defmodule Dnsmasqex do
     |> Config.normalize()
   end
 
+  def normalize(%{type: __MODULE__}),
+    do: raise(ArgumentError, "Dnsmasqex needs the :technology that manages the interface")
+
   @impl VintageNet.Technology
-  def to_raw_config(ifname, %{type: __MODULE__, technology: technology} = config, opts) do
-    normalized_config = normalize(config)
+  def to_raw_config(ifname, %{type: __MODULE__} = config, opts) do
+    %{technology: technology} = normalized_config = normalize(config)
     raw_config = technology.to_raw_config(ifname, %{normalized_config | type: technology}, opts)
 
     Config.add_config(
@@ -47,21 +53,8 @@ defmodule Dnsmasqex do
   end
 
   @impl VintageNet.Technology
-  def ioctl(ifname, :static_leases, [leases]) when is_list(leases) do
-    hosts = Config.hosts_contents(Config.normalize_static_leases(leases))
-
-    with :ok <- File.write(Config.hosts_path(tmpdir(), ifname), hosts) do
-      reload(ifname)
-    end
-  rescue
-    e in ArgumentError -> {:error, Exception.message(e)}
-  end
-
-  def ioctl(ifname, :reload, _args), do: reload(ifname)
-
   def ioctl(ifname, command, args) do
-    %{technology: technology} = VintageNet.get_configuration(ifname)
-    technology.ioctl(ifname, command, args)
+    run_ioctl(ifname, command, args, VintageNet.get_configuration(ifname))
   end
 
   @impl VintageNet.Technology
@@ -75,12 +68,42 @@ defmodule Dnsmasqex do
     end
   end
 
-  defp reload(ifname) do
+  defp run_ioctl(ifname, :static_leases, [leases], %{dnsmasq: dnsmasq} = config) do
+    %{dnsmasq: %{static_leases: static_leases}} =
+      Config.normalize(%{config | dnsmasq: %{dnsmasq | static_leases: leases}})
+
+    with {:ok, pid} <- running_dnsmasq(ifname) do
+      File.write!(Config.hosts_path(tmpdir(), ifname), Config.hosts_contents(static_leases))
+      reload(pid)
+    end
+  rescue
+    e in ArgumentError -> {:error, Exception.message(e)}
+  end
+
+  defp run_ioctl(ifname, :reload, _args, %{dnsmasq: _}) do
+    with {:ok, pid} <- running_dnsmasq(ifname), do: reload(pid)
+  end
+
+  defp run_ioctl(ifname, command, args, %{technology: technology}),
+    do: technology.ioctl(ifname, command, args)
+
+  # Check the process before signaling it since the pid may have been reused
+  defp running_dnsmasq(ifname) do
+    conf_path = Config.conf_path(tmpdir(), ifname)
+
     with {:ok, pid} <- File.read(Config.pid_path(tmpdir(), ifname)),
-         {_output, 0} <- System.cmd("kill", ["-HUP", String.trim(pid)], stderr_to_stdout: true) do
-      :ok
+         pid = String.trim(pid),
+         {:ok, cmdline} <- File.read("/proc/#{pid}/cmdline"),
+         true <- String.contains?(cmdline, conf_path) do
+      {:ok, pid}
     else
-      {:error, _reason} = error -> error
+      _ -> {:error, :not_running}
+    end
+  end
+
+  defp reload(pid) do
+    case System.cmd("kill", ["-HUP", pid], stderr_to_stdout: true) do
+      {_output, 0} -> :ok
       {output, _status} -> {:error, String.trim(output)}
     end
   end

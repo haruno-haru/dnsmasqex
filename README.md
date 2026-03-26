@@ -43,13 +43,16 @@ iex> VintageNet.configure("eth1", %{
 
 The following fields are supported:
 
-* `:start` and `:end` - DHCP address range. Omit them for DNS only
-* `:lease_time` - seconds or `:infinite`
+* `:start` and `:end` - DHCP address range on the interface's subnet. Without
+  them, only static leases get addresses, or only DNS runs if there are none
+* `:lease_time` - seconds, at least 120, or `:infinite`
 * `:static_leases` - `{mac, ip}` or `{mac, ip, hostname}` tuples with infinite
   leases
 * `:records` - `{name, ip}` pairs, including their subdomains
-* `:hosts_dir` - a directory of `dhcp-host` files. New files are read
-  automatically
+* `:hosts_dir` - an absolute path to a directory of `dhcp-host` files. New files
+  are read automatically
+
+Don't combine `:dnsmasq` with `:dhcpd` or `:dnsd` on the same interface.
 
 ## Changing leases at runtime
 
@@ -66,7 +69,9 @@ one, run:
 VintageNet.ioctl("eth1", :reload)
 ```
 
-The configured static leases apply again when the interface is reconfigured.
+Leases set this way last until VintageNet rewrites the interface's files, for
+example when its configuration changes, VintageNet restarts, or the device
+reboots. dnsmasq reports every lease again as an `"old"` event when it reloads.
 
 ## Properties
 

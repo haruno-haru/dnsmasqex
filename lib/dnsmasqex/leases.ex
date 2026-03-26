@@ -18,6 +18,7 @@ defmodule Dnsmasqex.Leases do
 
       {:error, reason} ->
         Logger.error("#{ifname}: Failed to read dnsmasq leases from #{lease_path}: #{reason}")
+        clear(ifname)
     end
   end
 

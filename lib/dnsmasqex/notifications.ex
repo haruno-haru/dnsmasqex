@@ -30,7 +30,9 @@ defmodule Dnsmasqex.Notifications do
       PropertyTable.put(VintageNet, event_property(context.ifname), event)
     end
 
-    if event.name in @lease_actions, do: Leases.update(context.ifname, context.lease_path)
+    if event.name in @lease_actions do
+      Leases.update(context.ifname, context.lease_path)
+    end
 
     :ok
   end

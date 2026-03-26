@@ -6,13 +6,14 @@ defmodule Dnsmasqex.Config do
   @moduledoc """
   dnsmasq options for a static IPv4 interface
 
-  * `:start` and `:end` - DHCP address range. Omit them for DNS only
-  * `:lease_time` - seconds or `:infinite`
+  * `:start` and `:end` - DHCP address range on the interface's subnet. Without
+    them, only static leases get addresses, or only DNS runs if there are none
+  * `:lease_time` - seconds, at least 120, or `:infinite`
   * `:static_leases` - `{mac, ip}` or `{mac, ip, hostname}` tuples with
     infinite leases
   * `:records` - `{name, ip}` pairs, including their subdomains
-  * `:hosts_dir` - a directory of `dhcp-host` files. New files are read
-    automatically
+  * `:hosts_dir` - an absolute path to a directory of `dhcp-host` files. New
+    files are read automatically
 
   Other names are forwarded to the name servers in `/etc/resolv.conf`.
   """
@@ -26,16 +27,18 @@ defmodule Dnsmasqex.Config do
   Normalize the `:dnsmasq` options
   """
   @spec normalize(map()) :: map()
-  def normalize(%{ipv4: %{method: :static}, dnsmasq: dnsmasq} = config) do
+  def normalize(%{ipv4: %{method: :static} = ipv4, dnsmasq: dnsmasq} = config) do
+    check_no_busybox_servers(config)
+
     new_dnsmasq =
       dnsmasq
       |> Map.take([:start, :end, :lease_time, :static_leases, :records, :hosts_dir])
-      |> check_range()
+      |> normalize_range(ipv4)
       |> check_lease_time()
       |> check_hosts_dir()
-      |> Map.replace_lazy(:start, &IP.ip_to_tuple!/1)
-      |> Map.replace_lazy(:end, &IP.ip_to_tuple!/1)
-      |> Map.update(:static_leases, [], &normalize_static_leases/1)
+      |> Map.update(:static_leases, [], fn leases ->
+        Enum.map(leases, &normalize_lease(&1, ipv4))
+      end)
       |> Map.update(:records, [], fn records -> Enum.map(records, &normalize_record/1) end)
 
     %{config | dnsmasq: new_dnsmasq}
@@ -44,18 +47,35 @@ defmodule Dnsmasqex.Config do
   def normalize(%{dnsmasq: _not_static} = config), do: Map.drop(config, [:dnsmasq])
   def normalize(config), do: config
 
-  defp check_range(%{start: _, end: _} = dnsmasq), do: dnsmasq
+  defp check_no_busybox_servers(%{dhcpd: _}),
+    do: raise(ArgumentError, "Use :dnsmasq instead of :dhcpd with Dnsmasqex")
 
-  defp check_range(%{start: _} = dnsmasq),
+  defp check_no_busybox_servers(%{dnsd: _}),
+    do: raise(ArgumentError, "Use :dnsmasq instead of :dnsd with Dnsmasqex")
+
+  defp check_no_busybox_servers(_config), do: :ok
+
+  defp normalize_range(%{start: first, end: last} = dnsmasq, ipv4) do
+    first = subnet_ip!(first, ipv4)
+    last = subnet_ip!(last, ipv4)
+
+    if first > last do
+      raise ArgumentError, "dnsmasq :start #{IP.ip_to_string(first)} is after :end"
+    end
+
+    %{dnsmasq | start: first, end: last}
+  end
+
+  defp normalize_range(%{start: _} = dnsmasq, _ipv4),
     do: raise(ArgumentError, "dnsmasq :start needs an :end in #{inspect(dnsmasq)}")
 
-  defp check_range(%{end: _} = dnsmasq),
+  defp normalize_range(%{end: _} = dnsmasq, _ipv4),
     do: raise(ArgumentError, "dnsmasq :end needs a :start in #{inspect(dnsmasq)}")
 
-  defp check_range(dnsmasq), do: dnsmasq
+  defp normalize_range(dnsmasq, _ipv4), do: dnsmasq
 
   defp check_lease_time(%{lease_time: lease_time} = dnsmasq)
-       when lease_time == :infinite or (is_integer(lease_time) and lease_time > 0),
+       when lease_time == :infinite or (is_integer(lease_time) and lease_time >= 120),
        do: dnsmasq
 
   defp check_lease_time(%{lease_time: lease_time}),
@@ -63,43 +83,77 @@ defmodule Dnsmasqex.Config do
 
   defp check_lease_time(dnsmasq), do: dnsmasq
 
-  defp check_hosts_dir(%{hosts_dir: hosts_dir} = dnsmasq) when is_binary(hosts_dir), do: dnsmasq
+  defp check_hosts_dir(%{hosts_dir: hosts_dir} = dnsmasq) when is_binary(hosts_dir) do
+    if Path.type(hosts_dir) == :absolute and not String.contains?(hosts_dir, ["\n", "\r"]) do
+      dnsmasq
+    else
+      raise ArgumentError, "Invalid dnsmasq :hosts_dir #{inspect(hosts_dir)}"
+    end
+  end
 
   defp check_hosts_dir(%{hosts_dir: hosts_dir}),
     do: raise(ArgumentError, "Invalid dnsmasq :hosts_dir #{inspect(hosts_dir)}")
 
   defp check_hosts_dir(dnsmasq), do: dnsmasq
 
-  @doc false
-  @spec normalize_static_leases([tuple()]) :: [tuple()]
-  def normalize_static_leases(leases), do: Enum.map(leases, &normalize_lease/1)
+  defp normalize_lease({mac, ip}, ipv4), do: {check_mac(mac), subnet_ip!(ip, ipv4)}
 
-  defp normalize_lease({mac, ip}), do: {check_mac(mac), IP.ip_to_tuple!(ip)}
+  defp normalize_lease({mac, ip, hostname}, ipv4),
+    do: {check_mac(mac), subnet_ip!(ip, ipv4), check_hostname(hostname)}
 
-  defp normalize_lease({mac, ip, hostname}),
-    do: {check_mac(mac), IP.ip_to_tuple!(ip), check_hostname(hostname)}
+  defp normalize_lease(lease, _ipv4),
+    do: raise(ArgumentError, "Invalid dnsmasq static lease #{inspect(lease)}")
 
-  defp check_mac(mac) do
-    if is_binary(mac) and mac =~ ~r/\A[[:xdigit:]]{2}(:[[:xdigit:]]{2}){5}\z/ do
+  defp check_mac(mac) when is_binary(mac) do
+    if mac =~ ~r/\A[[:xdigit:]]{2}(:[[:xdigit:]]{2}){5}\z/ do
       mac
     else
       raise ArgumentError, "Invalid MAC address #{inspect(mac)}"
     end
   end
 
-  defp check_hostname(hostname) do
-    if is_binary(hostname) and hostname =~ ~r/\A[[:alnum:]]([[:alnum:]-]*[[:alnum:]])?\z/ do
+  defp check_mac(mac), do: raise(ArgumentError, "Invalid MAC address #{inspect(mac)}")
+
+  # dnsmasq reads these as a keyword or a lease time rather than a hostname
+  defp check_hostname(hostname) when hostname in ["ignore", "infinite"],
+    do: raise(ArgumentError, "Invalid hostname #{inspect(hostname)}")
+
+  defp check_hostname(hostname) when is_binary(hostname) do
+    if hostname =~ ~r/\A[[:alnum:]]([[:alnum:]-]*[[:alnum:]])?\z/ and
+         not (hostname =~ ~r/\A\d+[smhdw]?\z/) do
       hostname
     else
       raise ArgumentError, "Invalid hostname #{inspect(hostname)}"
     end
   end
 
-  defp normalize_record({name, ip}) do
-    if is_binary(name) and name =~ ~r/\A[^\s\/#]+\z/ do
-      {name, IP.ip_to_tuple!(ip)}
+  defp check_hostname(hostname), do: raise(ArgumentError, "Invalid hostname #{inspect(hostname)}")
+
+  defp normalize_record({name, ip}) when is_binary(name) do
+    if name =~ ~r/\A[^\s\/#]+\z/ do
+      {name, ipv4!(ip)}
     else
       raise ArgumentError, "Invalid dnsmasq record name #{inspect(name)}"
+    end
+  end
+
+  defp normalize_record(record),
+    do: raise(ArgumentError, "Invalid dnsmasq record #{inspect(record)}")
+
+  defp ipv4!(ip) do
+    case IP.ip_to_tuple(ip) do
+      {:ok, {_, _, _, _} = ip} -> ip
+      _ -> raise ArgumentError, "Invalid IPv4 address #{inspect(ip)}"
+    end
+  end
+
+  defp subnet_ip!(ip, %{address: address, prefix_length: prefix_length}) do
+    ip = ipv4!(ip)
+
+    if IP.to_subnet(ip, prefix_length) == IP.to_subnet(address, prefix_length) do
+      ip
+    else
+      raise ArgumentError, "#{IP.ip_to_string(ip)} isn't on the interface's subnet"
     end
   end
 
@@ -109,33 +163,17 @@ defmodule Dnsmasqex.Config do
   @spec add_config(RawConfig.t(), map(), keyword()) :: RawConfig.t()
   def add_config(
         %RawConfig{ifname: ifname} = raw_config,
-        %{
-          ipv4: %{method: :static, address: address, prefix_length: prefix_length},
-          dnsmasq: dnsmasq
-        },
+        %{ipv4: %{method: :static} = ipv4, dnsmasq: dnsmasq},
         opts
       ) do
     tmpdir = Keyword.fetch!(opts, :tmpdir)
-    conf_path = Path.join(tmpdir, "dnsmasq.conf.#{ifname}")
-    lease_path = Path.join(tmpdir, "dnsmasq.#{ifname}.leases")
     notify_name = "dnsmasqex_#{ifname}"
-
-    hosts_path = hosts_path(tmpdir, ifname)
-
-    contents =
-      dnsmasq_contents(dnsmasq, %{
-        ifname: ifname,
-        address: address,
-        pid_path: pid_path(tmpdir, ifname),
-        lease_path: lease_path,
-        hosts_path: hosts_path
-      })
 
     context = %{
       ifname: ifname,
-      address: address,
-      prefix_length: prefix_length,
-      lease_path: lease_path
+      address: ipv4.address,
+      prefix_length: ipv4.prefix_length,
+      lease_path: lease_path(tmpdir, ifname)
     }
 
     notifier =
@@ -150,7 +188,7 @@ defmodule Dnsmasqex.Config do
         {Daemon,
          ifname: ifname,
          command: dnsmasq_path(),
-         args: ["-k", "-C", conf_path, "--log-facility=-"],
+         args: ["-k", "-C", conf_path(tmpdir, ifname), "--log-facility=-"],
          opts: [
            env: BEAMNotify.env(name: notify_name),
            stderr_to_stdout: true,
@@ -162,9 +200,10 @@ defmodule Dnsmasqex.Config do
     %{
       raw_config
       | files: [
-          {conf_path, contents},
-          {hosts_path, hosts_contents(dnsmasq.static_leases)} | raw_config.files
+          {conf_path(tmpdir, ifname), dnsmasq_contents(dnsmasq, ifname, ipv4, tmpdir)},
+          {hosts_path(tmpdir, ifname), hosts_contents(dnsmasq.static_leases)} | raw_config.files
         ],
+        cleanup_files: [pid_path(tmpdir, ifname) | raw_config.cleanup_files],
         child_specs: raw_config.child_specs ++ [notifier, daemon],
         down_cmds: raw_config.down_cmds ++ [{:fun, Notifications, :clear, [ifname]}]
     }
@@ -172,27 +211,21 @@ defmodule Dnsmasqex.Config do
 
   def add_config(raw_config, _config_without_dnsmasq, _opts), do: raw_config
 
-  defp dnsmasq_contents(dnsmasq, %{
-         ifname: ifname,
-         address: address,
-         pid_path: pid_path,
-         lease_path: lease_path,
-         hosts_path: hosts_path
-       }) do
+  defp dnsmasq_contents(dnsmasq, ifname, ipv4, tmpdir) do
     [
       "interface=#{ifname}",
       "except-interface=lo",
-      "listen-address=#{IP.ip_to_string(address)}",
+      "listen-address=#{IP.ip_to_string(ipv4.address)}",
       "bind-interfaces",
       "no-hosts",
       "user=root",
-      "pid-file=#{pid_path}",
-      "dhcp-leasefile=#{lease_path}",
+      "pid-file=#{pid_path(tmpdir, ifname)}",
+      "dhcp-leasefile=#{lease_path(tmpdir, ifname)}",
       "dhcp-script=#{BEAMNotify.bin_path()}",
       "script-arp",
       "script-on-renewal",
-      dhcp_range(dnsmasq),
-      "dhcp-hostsfile=#{hosts_path}",
+      dhcp_range(dnsmasq, ipv4),
+      "dhcp-hostsfile=#{hosts_path(tmpdir, ifname)}",
       hosts_dir(dnsmasq),
       Enum.map(dnsmasq.records, fn {name, ip} -> "address=/#{name}/#{IP.ip_to_string(ip)}" end)
     ]
@@ -200,38 +233,52 @@ defmodule Dnsmasqex.Config do
     |> Enum.map_join(&[&1, "\n"])
   end
 
-  defp dhcp_range(%{start: first, end: last} = dnsmasq) do
-    fields = [IP.ip_to_string(first), IP.ip_to_string(last) | lease_time(dnsmasq[:lease_time])]
-    "dhcp-range=" <> Enum.join(fields, ",")
+  defp dhcp_range(%{start: first, end: last} = dnsmasq, _ipv4) do
+    range_line([IP.ip_to_string(first), IP.ip_to_string(last)], dnsmasq)
   end
 
-  defp dhcp_range(_dns_only), do: []
+  defp dhcp_range(%{static_leases: [], hosts_dir: _} = dnsmasq, ipv4),
+    do: static_range(dnsmasq, ipv4)
+
+  defp dhcp_range(%{static_leases: [_ | _]} = dnsmasq, ipv4), do: static_range(dnsmasq, ipv4)
+  defp dhcp_range(_dns_only, _ipv4), do: []
+
+  defp static_range(dnsmasq, ipv4) do
+    subnet = IP.to_subnet(ipv4.address, ipv4.prefix_length)
+    range_line([IP.ip_to_string(subnet), "static"], dnsmasq)
+  end
+
+  defp range_line(fields, dnsmasq) do
+    "dhcp-range=" <> Enum.join(fields ++ lease_time(dnsmasq[:lease_time]), ",")
+  end
+
+  defp lease_time(nil), do: []
+  defp lease_time(:infinite), do: ["infinite"]
+  defp lease_time(seconds), do: [Integer.to_string(seconds)]
 
   defp hosts_dir(%{hosts_dir: hosts_dir}), do: "dhcp-hostsdir=#{hosts_dir}"
   defp hosts_dir(_dnsmasq), do: []
 
   @doc false
   @spec hosts_contents([tuple()]) :: String.t()
-  def hosts_contents(static_leases) do
-    Enum.map_join(static_leases, fn lease ->
-      Enum.map_join(Tuple.to_list(lease), ",", &host_field/1) <> ",infinite\n"
-    end)
-  end
+  def hosts_contents(static_leases), do: Enum.map_join(static_leases, &host_line/1)
 
-  defp host_field(ip) when is_tuple(ip), do: IP.ip_to_string(ip)
-  defp host_field(field), do: field
+  defp host_line({mac, ip}), do: "#{mac},#{IP.ip_to_string(ip)},infinite\n"
+  defp host_line({mac, ip, hostname}), do: "#{mac},#{IP.ip_to_string(ip)},#{hostname},infinite\n"
 
   @doc false
-  @spec hosts_path(Path.t(), VintageNet.ifname()) :: Path.t()
-  def hosts_path(tmpdir, ifname), do: Path.join(tmpdir, "dnsmasq.#{ifname}.hosts")
+  @spec conf_path(Path.t(), VintageNet.ifname()) :: Path.t()
+  def conf_path(tmpdir, ifname), do: Path.join(tmpdir, "dnsmasq.conf.#{ifname}")
 
   @doc false
   @spec pid_path(Path.t(), VintageNet.ifname()) :: Path.t()
   def pid_path(tmpdir, ifname), do: Path.join(tmpdir, "dnsmasq.#{ifname}.pid")
 
-  defp lease_time(nil), do: []
-  defp lease_time(:infinite), do: ["infinite"]
-  defp lease_time(seconds), do: [Integer.to_string(seconds)]
+  @doc false
+  @spec hosts_path(Path.t(), VintageNet.ifname()) :: Path.t()
+  def hosts_path(tmpdir, ifname), do: Path.join(tmpdir, "dnsmasq.#{ifname}.hosts")
+
+  defp lease_path(tmpdir, ifname), do: Path.join(tmpdir, "dnsmasq.#{ifname}.leases")
 
   @doc false
   @spec dnsmasq_path() :: String.t()
