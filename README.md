@@ -45,7 +45,7 @@ The following fields are supported:
 
 * `:start` and `:end` - DHCP address range on the interface's subnet. Without
   them, only static leases get addresses, or only DNS runs if there are none
-* `:lease_time` - seconds, at least 120, or `:infinite`
+* `:lease_time` - seconds, from 120 to 4_294_967_294, or `:infinite`
 * `:static_leases` - `{mac, ip}` or `{mac, ip, hostname}` tuples with infinite
   leases
 * `:records` - `{name, ip}` pairs, including their subdomains
@@ -53,6 +53,8 @@ The following fields are supported:
   are read automatically
 
 Don't combine `:dnsmasq` with `:dhcpd` or `:dnsd` on the same interface.
+Static leases must have unique MAC and IP addresses and cannot use the server's
+address or the subnet's network or broadcast address.
 
 ## Changing leases at runtime
 
@@ -79,3 +81,10 @@ Property        | Values                      | Description
 --------------- | --------------------------- | -----------
 `dhcpd/leases`  | `[%{}, ...]`                | Current leases, in the same format as VintageNet's `:dhcpd`. `leasetime` is `:infinity` for infinite leases
 `dnsmasq/event` | `%Dnsmasqex.Event{}` | The latest lease or neighbor event. See `Dnsmasqex.Event`
+
+## Development
+
+Run `mix test`, `mix format --check-formatted`, `mix credo --strict`, and
+`mix dialyzer`. Linux runs the process identity and signal tests. Installing
+dnsmasq also enables tests that check generated configuration with
+`dnsmasq --test`.

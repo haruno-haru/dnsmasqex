@@ -8,7 +8,7 @@ defmodule Dnsmasqex.Config do
 
   * `:start` and `:end` - DHCP address range on the interface's subnet. Without
     them, only static leases get addresses, or only DNS runs if there are none
-  * `:lease_time` - seconds, at least 120, or `:infinite`
+  * `:lease_time` - seconds, from 120 to 4_294_967_294, or `:infinite`
   * `:static_leases` - `{mac, ip}` or `{mac, ip, hostname}` tuples with
     infinite leases
   * `:records` - `{name, ip}` pairs, including their subdomains
@@ -27,8 +27,10 @@ defmodule Dnsmasqex.Config do
   Normalize the `:dnsmasq` options
   """
   @spec normalize(map()) :: map()
-  def normalize(%{ipv4: %{method: :static} = ipv4, dnsmasq: dnsmasq} = config) do
+  def normalize(%{ipv4: %{method: :static} = ipv4, dnsmasq: dnsmasq} = config)
+      when is_map(dnsmasq) do
     check_no_busybox_servers(config)
+    check_ipv4(ipv4)
 
     new_dnsmasq =
       dnsmasq
@@ -36,13 +38,14 @@ defmodule Dnsmasqex.Config do
       |> normalize_range(ipv4)
       |> check_lease_time()
       |> check_hosts_dir()
-      |> Map.update(:static_leases, [], fn leases ->
-        Enum.map(leases, &normalize_lease(&1, ipv4))
-      end)
-      |> Map.update(:records, [], fn records -> Enum.map(records, &normalize_record/1) end)
+      |> Map.update(:static_leases, [], &normalize_leases(&1, ipv4))
+      |> Map.update(:records, [], &normalize_records/1)
 
     %{config | dnsmasq: new_dnsmasq}
   end
+
+  def normalize(%{ipv4: %{method: :static}, dnsmasq: dnsmasq}),
+    do: raise(ArgumentError, "Expected a map for :dnsmasq, got: #{inspect(dnsmasq)}")
 
   def normalize(%{dnsmasq: _not_static} = config), do: Map.drop(config, [:dnsmasq])
   def normalize(config), do: config
@@ -54,6 +57,15 @@ defmodule Dnsmasqex.Config do
     do: raise(ArgumentError, "Use :dnsmasq instead of :dnsd with Dnsmasqex")
 
   defp check_no_busybox_servers(_config), do: :ok
+
+  defp check_ipv4(%{address: {_, _, _, _} = address, prefix_length: prefix_length})
+       when is_integer(prefix_length) and prefix_length in 0..32 do
+    _ = ipv4!(address)
+    :ok
+  end
+
+  defp check_ipv4(ipv4),
+    do: raise(ArgumentError, "Invalid static IPv4 configuration #{inspect(ipv4)}")
 
   defp normalize_range(%{start: first, end: last} = dnsmasq, ipv4) do
     first = subnet_ip!(first, ipv4)
@@ -75,7 +87,8 @@ defmodule Dnsmasqex.Config do
   defp normalize_range(dnsmasq, _ipv4), do: dnsmasq
 
   defp check_lease_time(%{lease_time: lease_time} = dnsmasq)
-       when lease_time == :infinite or (is_integer(lease_time) and lease_time >= 120),
+       when lease_time == :infinite or
+              (is_integer(lease_time) and lease_time in 120..0xFFFFFFFE),
        do: dnsmasq
 
   defp check_lease_time(%{lease_time: lease_time}),
@@ -84,7 +97,8 @@ defmodule Dnsmasqex.Config do
   defp check_lease_time(dnsmasq), do: dnsmasq
 
   defp check_hosts_dir(%{hosts_dir: hosts_dir} = dnsmasq) when is_binary(hosts_dir) do
-    if Path.type(hosts_dir) == :absolute and not String.contains?(hosts_dir, ["\n", "\r"]) do
+    if Path.type(hosts_dir) == :absolute and String.trim(hosts_dir) == hosts_dir and
+         not Regex.match?(~r/[\x00-\x1f\x7f"]| #/, hosts_dir) do
       dnsmasq
     else
       raise ArgumentError, "Invalid dnsmasq :hosts_dir #{inspect(hosts_dir)}"
@@ -96,17 +110,52 @@ defmodule Dnsmasqex.Config do
 
   defp check_hosts_dir(dnsmasq), do: dnsmasq
 
-  defp normalize_lease({mac, ip}, ipv4), do: {check_mac(mac), subnet_ip!(ip, ipv4)}
+  defp normalize_leases(leases, ipv4) when is_list(leases) do
+    leases = Enum.map(leases, &normalize_lease(&1, ipv4))
+
+    if length(Enum.uniq_by(leases, &elem(&1, 0))) != length(leases) do
+      raise ArgumentError, "Duplicate MAC address in dnsmasq :static_leases"
+    end
+
+    if length(Enum.uniq_by(leases, &elem(&1, 1))) != length(leases) do
+      raise ArgumentError, "Duplicate IP address in dnsmasq :static_leases"
+    end
+
+    leases
+  end
+
+  defp normalize_leases(leases, _ipv4),
+    do: raise(ArgumentError, "Expected a list for :static_leases, got: #{inspect(leases)}")
+
+  defp normalize_lease({mac, ip}, ipv4), do: {check_mac(mac), lease_ip!(ip, ipv4)}
 
   defp normalize_lease({mac, ip, hostname}, ipv4),
-    do: {check_mac(mac), subnet_ip!(ip, ipv4), check_hostname(hostname)}
+    do: {check_mac(mac), lease_ip!(ip, ipv4), check_hostname(hostname)}
 
   defp normalize_lease(lease, _ipv4),
     do: raise(ArgumentError, "Invalid dnsmasq static lease #{inspect(lease)}")
 
+  defp lease_ip!(ip, ipv4) do
+    {a, b, c, d} = ip = subnet_ip!(ip, ipv4)
+    prefix_length = ipv4.prefix_length
+    host_count = Integer.pow(2, 32 - prefix_length)
+    <<address::32>> = <<a, b, c, d>>
+    host = rem(address, host_count)
+
+    if ip == ipv4.address do
+      raise ArgumentError, "A dnsmasq static lease can't use the interface's address"
+    end
+
+    if prefix_length <= 30 and host in [0, host_count - 1] do
+      raise ArgumentError, "A dnsmasq static lease can't use the network or broadcast address"
+    end
+
+    ip
+  end
+
   defp check_mac(mac) when is_binary(mac) do
     if mac =~ ~r/\A[[:xdigit:]]{2}(:[[:xdigit:]]{2}){5}\z/ do
-      mac
+      String.downcase(mac)
     else
       raise ArgumentError, "Invalid MAC address #{inspect(mac)}"
     end
@@ -118,9 +167,9 @@ defmodule Dnsmasqex.Config do
   defp check_hostname(hostname) when hostname in ["ignore", "infinite"],
     do: raise(ArgumentError, "Invalid hostname #{inspect(hostname)}")
 
-  defp check_hostname(hostname) when is_binary(hostname) do
+  defp check_hostname(hostname) when is_binary(hostname) and byte_size(hostname) <= 63 do
     if hostname =~ ~r/\A[[:alnum:]]([[:alnum:]-]*[[:alnum:]])?\z/ and
-         not (hostname =~ ~r/\A\d+[smhdw]?\z/) do
+         not (hostname =~ ~r/\A\d+[smhdwSMHDW]?\z/) do
       hostname
     else
       raise ArgumentError, "Invalid hostname #{inspect(hostname)}"
@@ -129,8 +178,21 @@ defmodule Dnsmasqex.Config do
 
   defp check_hostname(hostname), do: raise(ArgumentError, "Invalid hostname #{inspect(hostname)}")
 
+  defp normalize_records(records) when is_list(records),
+    do: Enum.map(records, &normalize_record/1)
+
+  defp normalize_records(records),
+    do: raise(ArgumentError, "Expected a list for :records, got: #{inspect(records)}")
+
   defp normalize_record({name, ip}) when is_binary(name) do
-    if name =~ ~r/\A[^\s\/#]+\z/ do
+    domain =
+      name
+      |> String.replace_prefix("*", "")
+      |> String.trim_leading(".")
+      |> String.trim_trailing(".")
+
+    if name =~ ~r/\A[^\s\x00-\x1f\x7f\/#"]+\z/ and byte_size(domain) <= 253 and
+         (domain == "" or Enum.all?(String.split(domain, "."), &(byte_size(&1) in 1..63))) do
       {name, ipv4!(ip)}
     else
       raise ArgumentError, "Invalid dnsmasq record name #{inspect(name)}"
@@ -142,8 +204,12 @@ defmodule Dnsmasqex.Config do
 
   defp ipv4!(ip) do
     case IP.ip_to_tuple(ip) do
-      {:ok, {_, _, _, _} = ip} -> ip
-      _ -> raise ArgumentError, "Invalid IPv4 address #{inspect(ip)}"
+      {:ok, {a, b, c, d} = ip}
+      when is_integer(a) and is_integer(b) and is_integer(c) and is_integer(d) ->
+        ip
+
+      _ ->
+        raise ArgumentError, "Invalid IPv4 address #{inspect(ip)}"
     end
   end
 
