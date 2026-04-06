@@ -37,8 +37,9 @@ defmodule Dnsmasqex.Leases do
   @spec parse(String.t(), integer()) :: [map()]
   def parse(contents, now) do
     for line <- String.split(contents, "\n", trim: true),
-        [expiry, mac, ip, hostname | _] <- [String.split(line)],
-        {expiry, ""} <- [Integer.parse(expiry)] do
+        [expiry, mac, ip, hostname, _client_id] <- [String.split(line)],
+        {expiry, ""} <- [Integer.parse(expiry)],
+        expiry >= 0 do
       %{
         leasetime: leasetime(expiry, now),
         lease_nip: ip,

@@ -97,7 +97,7 @@ defmodule Dnsmasqex.Event do
 
   defp time_remaining(seconds) do
     case Integer.parse(seconds) do
-      {seconds, ""} -> seconds
+      {seconds, ""} when seconds >= 0 -> seconds
       _ -> nil
     end
   end

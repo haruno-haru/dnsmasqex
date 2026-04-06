@@ -18,6 +18,7 @@ defmodule Dnsmasqex.Config do
   Other names are forwarded to the name servers in `/etc/resolv.conf`.
   """
 
+  alias VintageNet.Command
   alias VintageNet.Interface.RawConfig
   alias VintageNet.IP
   alias Dnsmasqex.Daemon
@@ -242,12 +243,13 @@ defmodule Dnsmasqex.Config do
       lease_path: lease_path(tmpdir, ifname)
     }
 
-    notifier =
-      Supervisor.child_spec(
-        {BEAMNotify,
-         name: notify_name, report_env: true, dispatcher: &Notifications.dispatch(&1, &2, context)},
-        id: :dnsmasq_notify
-      )
+    notifier_options = [
+      name: notify_name,
+      report_env: true,
+      dispatcher: &Notifications.dispatch(&1, &2, context)
+    ]
+
+    notifier = Supervisor.child_spec({BEAMNotify, notifier_options}, id: :dnsmasq_notify)
 
     daemon =
       Supervisor.child_spec(
@@ -255,11 +257,12 @@ defmodule Dnsmasqex.Config do
          ifname: ifname,
          command: dnsmasq_path(),
          args: ["-k", "-C", conf_path(tmpdir, ifname), "--log-facility=-"],
-         opts: [
-           env: BEAMNotify.env(name: notify_name),
-           stderr_to_stdout: true,
-           log_output: :debug
-         ]},
+         opts:
+           Command.add_muon_options(
+             env: BEAMNotify.env(notifier_options),
+             stderr_to_stdout: true,
+             log_output: :debug
+           )},
         id: :dnsmasq
       )
 
