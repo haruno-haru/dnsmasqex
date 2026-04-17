@@ -48,6 +48,12 @@ defmodule Dnsmasqex.Daemon do
   # Before OTP 26, a failed start_link also sends the exit of the process that failed
   def handle_info({:EXIT, _pid, _reason}, state), do: {:noreply, state}
 
+  @impl GenServer
+  def terminate(_reason, state) do
+    if state.pid, do: Process.exit(state.pid, :shutdown)
+    :ok
+  end
+
   defp start_daemon(state) do
     Logger.debug("[dnsmasqex(#{state.ifname})] starting #{state.command}")
 
