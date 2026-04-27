@@ -68,7 +68,11 @@ defmodule DnsmasqexTest do
     assert raw_config.up_cmds == [:wired_up]
     assert raw_config.source_config.technology == WiredTechnology
     assert raw_config.down_cmds == [{:fun, Notifications, :clear, ["eth1"]}]
-    assert raw_config.cleanup_files == ["/tmp/vintage_net/dnsmasq.eth1.pid"]
+
+    assert raw_config.cleanup_files == [
+             "/tmp/vintage_net/dnsmasq.eth1.pid",
+             "/tmp/vintage_net/dnsmasq.eth1.hosts.new"
+           ]
 
     assert [
              {"/tmp/vintage_net/dnsmasq.conf.eth1", contents},
@@ -174,6 +178,8 @@ defmodule DnsmasqexTest do
 
   describe "static_leases ioctl" do
     setup do
+      dnsmasq = Application.fetch_env(:dnsmasqex, :dnsmasq)
+      Application.put_env(:dnsmasqex, :dnsmasq, "/bin/sh")
       tmpdir = Application.fetch_env!(:vintage_net, :tmpdir)
       File.mkdir_p!(tmpdir)
       hosts_path = Path.join(tmpdir, "dnsmasq.ioctl0.hosts")
@@ -184,8 +190,13 @@ defmodule DnsmasqexTest do
       PropertyTable.put(VintageNet, config_property, Dnsmasqex.normalize(@config))
 
       on_exit(fn ->
+        case dnsmasq do
+          {:ok, value} -> Application.put_env(:dnsmasqex, :dnsmasq, value)
+          :error -> Application.delete_env(:dnsmasqex, :dnsmasq)
+        end
+
         PropertyTable.delete(VintageNet, config_property)
-        Enum.each([hosts_path, pid_path], &File.rm/1)
+        Enum.each([hosts_path, pid_path, hosts_path <> ".new"], &File.rm_rf!/1)
       end)
 
       %{
@@ -213,11 +224,30 @@ defmodule DnsmasqexTest do
       assert File.read!(hosts_path) == "aa:bb:cc:dd:ee:ff,192.168.24.100,infinite\n"
     end
 
+    test "rejects malformed lease collections without changing the file", %{hosts_path: path} do
+      assert {:error, "Expected a list for :static_leases, got: nil"} =
+               Dnsmasqex.ioctl("ioctl0", :static_leases, [nil])
+
+      assert File.read!(path) == "aa:bb:cc:dd:ee:ff,192.168.24.100,infinite\n"
+    end
+
+    test "rejects enabling DHCP through a reload", %{hosts_path: path} do
+      config = Dnsmasqex.normalize(%{@config | dnsmasq: %{}})
+      PropertyTable.put(VintageNet, ["interface", "ioctl0", "config"], config)
+
+      assert {:error, :dhcp_disabled} =
+               Dnsmasqex.ioctl("ioctl0", :static_leases, [
+                 [{"aa:bb:cc:dd:ee:ff", "192.168.24.100"}]
+               ])
+
+      assert File.read!(path) == "aa:bb:cc:dd:ee:ff,192.168.24.100,infinite\n"
+    end
+
     @tag :linux
     test "rewrites the leases and signals dnsmasq to reload", context do
       port =
         start_process(
-          "trap 'echo reloaded' HUP; while true; do sleep 1 & wait $!; done",
+          "trap 'echo reloaded' HUP",
           context.conf_path
         )
 
@@ -230,13 +260,69 @@ defmodule DnsmasqexTest do
                "aa:bb:cc:dd:ee:01,192.168.24.101,printer,infinite\n"
 
       assert_receive {^port, {:data, "reloaded\n"}}, 3000
+      refute File.exists?(context.hosts_path <> ".new")
+    end
+
+    @tag :linux
+    test "concurrent lease updates publish complete files", context do
+      start_process("trap ':' HUP", context.conf_path)
+
+      results =
+        Task.async_stream(
+          1..8,
+          fn n ->
+            leases = [{"aa:bb:cc:dd:ee:ff", {192, 168, 24, 100 + n}, "printer#{n}"}]
+            Dnsmasqex.ioctl("ioctl0", :static_leases, [leases])
+          end,
+          max_concurrency: 8,
+          timeout: 10_000
+        )
+
+      assert Enum.all?(results, &(&1 == {:ok, :ok}))
+
+      assert File.read!(context.hosts_path) in Enum.map(
+               1..8,
+               &"aa:bb:cc:dd:ee:ff,192.168.24.#{100 + &1},printer#{&1},infinite\n"
+             )
+
+      refute File.exists?(context.hosts_path <> ".new")
+    end
+
+    @tag :linux
+    test "returns file errors without replacing the current leases", context do
+      start_process(":", context.conf_path)
+      File.mkdir!(context.hosts_path <> ".new")
+
+      assert {:error, :eisdir} =
+               Dnsmasqex.ioctl("ioctl0", :static_leases, [[]])
+
+      assert File.read!(context.hosts_path) == "aa:bb:cc:dd:ee:ff,192.168.24.100,infinite\n"
+    end
+
+    @tag :linux
+    test "doesn't match another interface's configuration path", context do
+      start_process(":", context.conf_path <> "0")
+      assert {:error, :not_running} = Dnsmasqex.ioctl("ioctl0", :reload, [])
+    end
+
+    @tag :linux
+    test "requires the configuration path to follow the configuration option", context do
+      start_process(":", context.conf_path, "--unrelated")
+      assert {:error, :not_running} = Dnsmasqex.ioctl("ioctl0", :reload, [])
+    end
+
+    @tag :linux
+    test "doesn't signal another executable with matching arguments", context do
+      start_process(":", context.conf_path)
+      Application.put_env(:dnsmasqex, :dnsmasq, System.find_executable("cat"))
+      assert {:error, :not_running} = Dnsmasqex.ioctl("ioctl0", :reload, [])
     end
 
     @tag :linux
     test "doesn't signal a process that reused a stale pid" do
       port =
         start_process(
-          "trap 'echo alive' USR1; while true; do sleep 1 & wait $!; done",
+          "trap 'echo alive' USR1",
           "unrelated"
         )
 
@@ -248,12 +334,20 @@ defmodule DnsmasqexTest do
       assert_receive {^port, {:data, "alive\n"}}, 3000
     end
 
-    defp start_process(script, name) do
-      port = Port.open({:spawn_executable, "/bin/sh"}, [:binary, args: ["-c", script, name]])
+    defp start_process(traps, name, option \\ "-C") do
+      script = "trap 'exit' TERM; #{traps}; echo ready; while true; do sleep 1 & wait $!; done"
+
+      port =
+        Port.open({:spawn_executable, "/bin/sh"}, [
+          :binary,
+          args: ["-c", script, "dnsmasq-test", option, name]
+        ])
+
       {:os_pid, os_pid} = Port.info(port, :os_pid)
       pid_path = Path.join(Application.fetch_env!(:vintage_net, :tmpdir), "dnsmasq.ioctl0.pid")
       File.write!(pid_path, "#{os_pid}\n")
-      on_exit(fn -> System.cmd("kill", [to_string(os_pid)]) end)
+      on_exit(fn -> System.cmd("kill", [to_string(os_pid)], stderr_to_stdout: true) end)
+      assert_receive {^port, {:data, "ready\n"}}, 3000
       port
     end
   end

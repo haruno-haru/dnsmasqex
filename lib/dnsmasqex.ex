@@ -72,9 +72,14 @@ defmodule Dnsmasqex do
     %{dnsmasq: %{static_leases: static_leases}} =
       Config.normalize(%{config | dnsmasq: %{dnsmasq | static_leases: leases}})
 
-    with {:ok, pid} <- running_dnsmasq(ifname) do
-      File.write!(Config.hosts_path(tmpdir(), ifname), Config.hosts_contents(static_leases))
-      reload(pid)
+    if Config.dhcp_enabled?(dnsmasq) do
+      :global.trans(
+        {{__MODULE__, ifname}, self()},
+        fn -> update_static_leases(ifname, static_leases) end,
+        [node()]
+      )
+    else
+      {:error, :dhcp_disabled}
     end
   rescue
     e in ArgumentError -> {:error, Exception.message(e)}
@@ -87,14 +92,38 @@ defmodule Dnsmasqex do
   defp run_ioctl(ifname, command, args, %{technology: technology}),
     do: technology.ioctl(ifname, command, args)
 
-  # Check the process before signaling it since the pid may have been reused
+  defp update_static_leases(ifname, static_leases) do
+    with {:ok, pid} <- running_dnsmasq(ifname),
+         :ok <- write_hosts(ifname, static_leases) do
+      reload(pid)
+    end
+  end
+
+  defp write_hosts(ifname, static_leases) do
+    path = Config.hosts_path(tmpdir(), ifname)
+    temporary_path = path <> ".new"
+
+    with :ok <- File.write(temporary_path, Config.hosts_contents(static_leases)),
+         :ok <- File.rename(temporary_path, path) do
+      :ok
+    else
+      error ->
+        _ = File.rm(temporary_path)
+        error
+    end
+  end
+
   defp running_dnsmasq(ifname) do
     conf_path = Config.conf_path(tmpdir(), ifname)
 
-    with {:ok, pid} <- File.read(Config.pid_path(tmpdir(), ifname)),
-         pid = String.trim(pid),
+    with {:ok, contents} <- File.read(Config.pid_path(tmpdir(), ifname)),
+         {pid, ""} when pid > 0 <- Integer.parse(String.trim(contents)),
+         command when is_binary(command) <- System.find_executable(Config.dnsmasq_path()),
+         {:ok, %{major_device: device, inode: inode}} <- File.stat(command),
+         {:ok, %{major_device: ^device, inode: ^inode}} <- File.stat("/proc/#{pid}/exe"),
          {:ok, cmdline} <- File.read("/proc/#{pid}/cmdline"),
-         true <- String.contains?(cmdline, conf_path) do
+         true <-
+           ["-C", conf_path] in Enum.chunk_every(String.split(cmdline, "\0"), 2, 1, :discard) do
       {:ok, pid}
     else
       _ -> {:error, :not_running}
@@ -102,7 +131,7 @@ defmodule Dnsmasqex do
   end
 
   defp reload(pid) do
-    case System.cmd("kill", ["-HUP", pid], stderr_to_stdout: true) do
+    case System.cmd("kill", ["-HUP", Integer.to_string(pid)], stderr_to_stdout: true) do
       {_output, 0} -> :ok
       {output, _status} -> {:error, String.trim(output)}
     end

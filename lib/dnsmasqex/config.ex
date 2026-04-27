@@ -272,7 +272,10 @@ defmodule Dnsmasqex.Config do
           {conf_path(tmpdir, ifname), dnsmasq_contents(dnsmasq, ifname, ipv4, tmpdir)},
           {hosts_path(tmpdir, ifname), hosts_contents(dnsmasq.static_leases)} | raw_config.files
         ],
-        cleanup_files: [pid_path(tmpdir, ifname) | raw_config.cleanup_files],
+        cleanup_files: [
+          pid_path(tmpdir, ifname),
+          hosts_path(tmpdir, ifname) <> ".new" | raw_config.cleanup_files
+        ],
         child_specs: raw_config.child_specs ++ [notifier, daemon],
         down_cmds: raw_config.down_cmds ++ [{:fun, Notifications, :clear, [ifname]}]
     }
@@ -306,11 +309,16 @@ defmodule Dnsmasqex.Config do
     range_line([IP.ip_to_string(first), IP.ip_to_string(last)], dnsmasq)
   end
 
-  defp dhcp_range(%{static_leases: [], hosts_dir: _} = dnsmasq, ipv4),
-    do: static_range(dnsmasq, ipv4)
+  defp dhcp_range(dnsmasq, ipv4) do
+    if dhcp_enabled?(dnsmasq), do: static_range(dnsmasq, ipv4), else: []
+  end
 
-  defp dhcp_range(%{static_leases: [_ | _]} = dnsmasq, ipv4), do: static_range(dnsmasq, ipv4)
-  defp dhcp_range(_dns_only, _ipv4), do: []
+  @doc false
+  @spec dhcp_enabled?(map()) :: boolean()
+  def dhcp_enabled?(%{start: _, end: _}), do: true
+  def dhcp_enabled?(%{hosts_dir: _}), do: true
+  def dhcp_enabled?(%{static_leases: [_ | _]}), do: true
+  def dhcp_enabled?(_dnsmasq), do: false
 
   defp static_range(dnsmasq, ipv4) do
     subnet = IP.to_subnet(ipv4.address, ipv4.prefix_length)

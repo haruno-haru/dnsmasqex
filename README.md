@@ -64,6 +64,10 @@ To change the static leases without reconfiguring the interface, run:
 VintageNet.ioctl("eth1", :static_leases, [[{"aa:bb:cc:dd:ee:ff", "192.168.24.100"}]])
 ```
 
+DHCP must already be enabled through a range, static leases, or `:hosts_dir`.
+A DNS-only configuration returns `{:error, :dhcp_disabled}`; use
+`VintageNet.configure/2` to enable DHCP first.
+
 dnsmasq reads new files in `:hosts_dir` on its own. After changing or removing
 one, run:
 
