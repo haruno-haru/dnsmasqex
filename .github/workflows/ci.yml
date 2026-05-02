@@ -1,0 +1,73 @@
+# SPDX-FileCopyrightText: None
+#
+# SPDX-License-Identifier: CC0-1.0
+
+name: CI
+
+on: [push, pull_request]
+
+permissions:
+  contents: read
+
+jobs:
+  check-license:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: fsfe/reuse-action@v6
+
+  build-test:
+    name: Elixir ${{ matrix.elixir }} / OTP ${{ matrix.otp }}
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - elixir: "1.20.4"
+            otp: "29.1"
+            checks: true
+          - elixir: "1.19.6"
+            otp: "28.5.0.6"
+          - elixir: "1.18.5"
+            otp: "27.3.4.17"
+          - elixir: "1.17.3"
+            otp: "27.3.4.16"
+          - elixir: "1.16.3"
+            otp: "26.2.5"
+          - elixir: "1.15.7"
+            otp: "26.2.1"
+    env:
+      LC_ALL: C.UTF-8
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential libmnl-dev libnl-genl-3-dev dnsmasq-base
+      - uses: erlef/setup-beam@v1
+        with:
+          elixir-version: ${{ matrix.elixir }}
+          otp-version: ${{ matrix.otp }}
+          version-type: strict
+      - uses: actions/cache@v6
+        with:
+          path: |
+            _build
+            deps
+          key: v1-mix-cache-ubuntu-24.04-${{ matrix.elixir }}-${{ matrix.otp }}-${{ hashFiles('mix.lock') }}
+      - run: mix deps.get
+      - run: mix test
+      - if: matrix.checks
+        run: mix format --check-formatted
+      - if: matrix.checks
+        run: mix deps.unlock --check-unused
+      - if: matrix.checks
+        run: mix compile --warnings-as-errors
+      - if: matrix.checks
+        run: mix docs
+      - if: matrix.checks
+        run: mix hex.build
+      - if: matrix.checks
+        run: mix credo -a --strict
+      - if: matrix.checks
+        run: mix dialyzer
