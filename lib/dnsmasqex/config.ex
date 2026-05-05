@@ -59,11 +59,10 @@ defmodule Dnsmasqex.Config do
 
   defp check_no_busybox_servers(_config), do: :ok
 
-  defp check_ipv4(%{address: {_, _, _, _} = address, prefix_length: prefix_length})
-       when is_integer(prefix_length) and prefix_length in 0..32 do
-    _ = ipv4!(address)
-    :ok
-  end
+  defp check_ipv4(%{address: {a, b, c, d}, prefix_length: prefix_length})
+       when a in 0..255 and b in 0..255 and c in 0..255 and d in 0..255 and
+              prefix_length in 0..32,
+       do: :ok
 
   defp check_ipv4(ipv4),
     do: raise(ArgumentError, "Invalid static IPv4 configuration #{inspect(ipv4)}")
