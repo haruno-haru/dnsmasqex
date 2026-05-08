@@ -103,13 +103,8 @@ defmodule Dnsmasqex do
     path = Config.hosts_path(tmpdir(), ifname)
     temporary_path = path <> ".new"
 
-    with :ok <- File.write(temporary_path, Config.hosts_contents(static_leases)),
-         :ok <- File.rename(temporary_path, path) do
-      :ok
-    else
-      error ->
-        _ = File.rm(temporary_path)
-        error
+    with :ok <- File.write(temporary_path, Config.hosts_contents(static_leases)) do
+      File.rename(temporary_path, path)
     end
   end
 
