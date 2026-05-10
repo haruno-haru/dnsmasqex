@@ -178,8 +178,6 @@ defmodule DnsmasqexTest do
 
   describe "static_leases ioctl" do
     setup do
-      dnsmasq = Application.fetch_env(:dnsmasqex, :dnsmasq)
-      Application.put_env(:dnsmasqex, :dnsmasq, "/bin/sh")
       tmpdir = Application.fetch_env!(:vintage_net, :tmpdir)
       File.mkdir_p!(tmpdir)
       hosts_path = Path.join(tmpdir, "dnsmasq.ioctl0.hosts")
@@ -190,11 +188,6 @@ defmodule DnsmasqexTest do
       PropertyTable.put(VintageNet, config_property, Dnsmasqex.normalize(@config))
 
       on_exit(fn ->
-        case dnsmasq do
-          {:ok, value} -> Application.put_env(:dnsmasqex, :dnsmasq, value)
-          :error -> Application.delete_env(:dnsmasqex, :dnsmasq)
-        end
-
         PropertyTable.delete(VintageNet, config_property)
         Enum.each([hosts_path, pid_path, hosts_path <> ".new"], &File.rm_rf!/1)
       end)
@@ -308,13 +301,6 @@ defmodule DnsmasqexTest do
     @tag :linux
     test "requires the configuration path to follow the configuration option", context do
       start_process(":", context.conf_path, "--unrelated")
-      assert {:error, :not_running} = Dnsmasqex.ioctl("ioctl0", :reload, [])
-    end
-
-    @tag :linux
-    test "doesn't signal another executable with matching arguments", context do
-      start_process(":", context.conf_path)
-      Application.put_env(:dnsmasqex, :dnsmasq, System.find_executable("cat"))
       assert {:error, :not_running} = Dnsmasqex.ioctl("ioctl0", :reload, [])
     end
 

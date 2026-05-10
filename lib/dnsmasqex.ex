@@ -113,9 +113,6 @@ defmodule Dnsmasqex do
 
     with {:ok, contents} <- File.read(Config.pid_path(tmpdir(), ifname)),
          {pid, ""} when pid > 0 <- Integer.parse(String.trim(contents)),
-         command when is_binary(command) <- System.find_executable(Config.dnsmasq_path()),
-         {:ok, %{major_device: device, inode: inode}} <- File.stat(command),
-         {:ok, %{major_device: ^device, inode: ^inode}} <- File.stat("/proc/#{pid}/exe"),
          {:ok, cmdline} <- File.read("/proc/#{pid}/cmdline"),
          true <-
            ["-C", conf_path] in Enum.chunk_every(String.split(cmdline, "\0"), 2, 1, :discard) do
