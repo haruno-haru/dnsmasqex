@@ -20,17 +20,27 @@ defmodule Dnsmasqex.Event do
   * `:vendor_class` - the DHCP vendor class
   * `:tags` - the tags set during the DHCP transaction
   * `:time_remaining` - seconds until the lease expires
+  * `:requested_options` - the DHCP option numbers the client asked for, in
+    its order
+  * `:user_classes` - the client's DHCP user classes
+  * `:mud_url` - the client's Manufacturer Usage Description URL
+  * `:cpewan` - the TR-111 `:oui`, `:serial` and `:class` of a CPE client
+
+  dnsmasq only knows the request fields for leases it handled since it started.
+  The `"old"` events it reports on startup and reload for other leases leave
+  them `nil`.
 
   ## Examples
 
-      iex> Dnsmasqex.Event.new(["add", "aa:bb:cc:dd:ee:ff", "192.168.24.10", "printer"], %{"DNSMASQ_TIME_REMAINING" => "3600", "DNSMASQ_TAGS" => "eth1 known"})
+      iex> Dnsmasqex.Event.new(["add", "aa:bb:cc:dd:ee:ff", "192.168.24.10", "printer"], %{"DNSMASQ_TIME_REMAINING" => "3600", "DNSMASQ_TAGS" => "eth1 known", "DNSMASQ_REQUESTED_OPTIONS" => "1,3,6,15"})
       %Dnsmasqex.Event{
         name: "add",
         mac: "aa:bb:cc:dd:ee:ff",
         ip: "192.168.24.10",
         hostname: "printer",
         tags: ["eth1", "known"],
-        time_remaining: 3600
+        time_remaining: 3600,
+        requested_options: [1, 3, 6, 15]
       }
 
       iex> Dnsmasqex.Event.new(["arp-del", "aa:bb:cc:dd:ee:ff", "192.168.24.10"], %{})
@@ -51,7 +61,11 @@ defmodule Dnsmasqex.Event do
     :client_id,
     :vendor_class,
     :tags,
-    :time_remaining
+    :time_remaining,
+    :requested_options,
+    :user_classes,
+    :mud_url,
+    :cpewan
   ]
 
   @type t :: %__MODULE__{
@@ -64,8 +78,14 @@ defmodule Dnsmasqex.Event do
           client_id: String.t() | nil,
           vendor_class: String.t() | nil,
           tags: [String.t()] | nil,
-          time_remaining: non_neg_integer() | nil
+          time_remaining: non_neg_integer() | nil,
+          requested_options: [byte()] | nil,
+          user_classes: [String.t()] | nil,
+          mud_url: String.t() | nil,
+          cpewan: cpewan() | nil
         }
+
+  @type cpewan :: %{oui: String.t() | nil, serial: String.t() | nil, class: String.t() | nil}
 
   @client_actions ["add", "old", "del", "arp-add", "arp-del"]
 
@@ -84,7 +104,11 @@ defmodule Dnsmasqex.Event do
       client_id: env["DNSMASQ_CLIENT_ID"],
       vendor_class: env["DNSMASQ_VENDOR_CLASS"],
       tags: tags(env["DNSMASQ_TAGS"]),
-      time_remaining: time_remaining(env["DNSMASQ_TIME_REMAINING"])
+      time_remaining: time_remaining(env["DNSMASQ_TIME_REMAINING"]),
+      requested_options: requested_options(env["DNSMASQ_REQUESTED_OPTIONS"]),
+      user_classes: user_classes(env),
+      mud_url: env["DNSMASQ_MUD_URL"],
+      cpewan: cpewan(env)
     }
   end
 
@@ -92,6 +116,34 @@ defmodule Dnsmasqex.Event do
 
   defp tags(nil), do: nil
   defp tags(tags), do: String.split(tags)
+
+  defp requested_options(nil), do: nil
+
+  defp requested_options(options) do
+    numbers = options |> String.split(",") |> Enum.map(&Integer.parse/1)
+
+    if Enum.all?(numbers, &match?({number, ""} when number in 0..255, &1)),
+      do: Enum.map(numbers, &elem(&1, 0))
+  end
+
+  defp user_classes(env) do
+    classes =
+      Stream.iterate(0, &(&1 + 1))
+      |> Stream.map(&env["DNSMASQ_USER_CLASS#{&1}"])
+      |> Enum.take_while(& &1)
+
+    if classes != [], do: classes
+  end
+
+  defp cpewan(env) do
+    cpewan = %{
+      oui: env["DNSMASQ_CPEWAN_OUI"],
+      serial: env["DNSMASQ_CPEWAN_SERIAL"],
+      class: env["DNSMASQ_CPEWAN_CLASS"]
+    }
+
+    if Enum.any?(Map.values(cpewan)), do: cpewan
+  end
 
   defp time_remaining(nil), do: nil
 
