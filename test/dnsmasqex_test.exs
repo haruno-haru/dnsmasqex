@@ -49,6 +49,7 @@ defmodule DnsmasqexTest do
         {"aa:bb:cc:dd:ee:01", "192.168.24.101", "printer"}
       ],
       records: [{"device.example.com", "192.168.24.1"}],
+      options: %{43 => "4d:53", router: [], dns: "192.168.24.1", search: ["lan"], mtu: 1400},
       hosts_dir: "/data/dnsmasq/hosts"
     }
   }
@@ -71,12 +72,14 @@ defmodule DnsmasqexTest do
 
     assert raw_config.cleanup_files == [
              "/tmp/vintage_net/dnsmasq.eth1.pid",
-             "/tmp/vintage_net/dnsmasq.eth1.hosts.new"
+             "/tmp/vintage_net/dnsmasq.eth1.hosts.new",
+             "/tmp/vintage_net/dnsmasq.eth1.options.new"
            ]
 
     assert [
              {"/tmp/vintage_net/dnsmasq.conf.eth1", contents},
-             {"/tmp/vintage_net/dnsmasq.eth1.hosts", hosts}
+             {"/tmp/vintage_net/dnsmasq.eth1.hosts", hosts},
+             {"/tmp/vintage_net/dnsmasq.eth1.options", options}
            ] = raw_config.files
 
     assert contents == """
@@ -93,6 +96,7 @@ defmodule DnsmasqexTest do
            script-on-renewal
            dhcp-range=192.168.24.10,192.168.24.99,3600
            dhcp-hostsfile=/tmp/vintage_net/dnsmasq.eth1.hosts
+           dhcp-optsfile=/tmp/vintage_net/dnsmasq.eth1.options
            dhcp-hostsdir=/data/dnsmasq/hosts
            address=/device.example.com/192.168.24.1
            """
@@ -100,6 +104,14 @@ defmodule DnsmasqexTest do
     assert hosts == """
            aa:bb:cc:dd:ee:ff,192.168.24.100,infinite
            aa:bb:cc:dd:ee:01,192.168.24.101,printer,infinite
+           """
+
+    assert options == """
+           43,4d:53
+           option:dns-server,192.168.24.1
+           option:mtu,1400
+           option:router
+           option:domain-search,lan
            """
   end
 
@@ -181,6 +193,7 @@ defmodule DnsmasqexTest do
       tmpdir = Application.fetch_env!(:vintage_net, :tmpdir)
       File.mkdir_p!(tmpdir)
       hosts_path = Path.join(tmpdir, "dnsmasq.ioctl0.hosts")
+      options_path = Path.join(tmpdir, "dnsmasq.ioctl0.options")
       pid_path = Path.join(tmpdir, "dnsmasq.ioctl0.pid")
       File.write!(hosts_path, "aa:bb:cc:dd:ee:ff,192.168.24.100,infinite\n")
 
@@ -189,11 +202,16 @@ defmodule DnsmasqexTest do
 
       on_exit(fn ->
         PropertyTable.delete(VintageNet, config_property)
-        Enum.each([hosts_path, pid_path, hosts_path <> ".new"], &File.rm_rf!/1)
+
+        Enum.each(
+          [hosts_path, options_path, pid_path, hosts_path <> ".new", options_path <> ".new"],
+          &File.rm_rf!/1
+        )
       end)
 
       %{
         hosts_path: hosts_path,
+        options_path: options_path,
         pid_path: pid_path,
         conf_path: Path.join(tmpdir, "dnsmasq.conf.ioctl0")
       }
@@ -254,6 +272,22 @@ defmodule DnsmasqexTest do
 
       assert_receive {^port, {:data, "reloaded\n"}}, 3000
       refute File.exists?(context.hosts_path <> ".new")
+    end
+
+    @tag :linux
+    test "rewrites the DHCP options and signals dnsmasq to reload", context do
+      port = start_process("trap 'echo reloaded' HUP", context.conf_path)
+
+      assert :ok = Dnsmasqex.ioctl("ioctl0", :options, [%{router: []}])
+      assert File.read!(context.options_path) == "option:router\n"
+      assert_receive {^port, {:data, "reloaded\n"}}, 3000
+    end
+
+    test "rejects invalid DHCP options without writing them", context do
+      assert {:error, "Invalid dnsmasq option {:mtu, 1}"} =
+               Dnsmasqex.ioctl("ioctl0", :options, [%{mtu: 1}])
+
+      refute File.exists?(context.options_path)
     end
 
     @tag :linux

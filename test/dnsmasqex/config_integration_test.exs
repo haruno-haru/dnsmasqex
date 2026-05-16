@@ -15,6 +15,22 @@ defmodule Dnsmasqex.ConfigIntegrationTest do
   for {name, dnsmasq} <- [
         {"DNS only", %{records: [{"device.example.com", "192.168.24.1"}]}},
         {"infinite DHCP", %{start: "192.168.24.10", end: "192.168.24.99", lease_time: :infinite}},
+        {"DHCP options",
+         %{
+           start: "192.168.24.10",
+           end: "192.168.24.99",
+           options: %{
+             43 => "4d:53:46:54",
+             252 => "\"http://192.168.24.1/wpad.dat\"",
+             router: [],
+             dns: ["192.168.24.1"],
+             ntp: ["192.168.24.1"],
+             search: ["lan", "example.com"],
+             domain: "lan",
+             hostname: "client",
+             mtu: 1400
+           }
+         }},
         {"static DHCP",
          %{static_leases: [{"aa:bb:cc:dd:ee:ff", "192.168.24.100", "printer"}], lease_time: 3600}}
       ] do
@@ -52,11 +68,22 @@ defmodule Dnsmasqex.ConfigIntegrationTest do
 
     for {path, contents} <- raw_config.files, do: File.write!(path, contents)
 
-    {output, status} =
-      System.cmd("dnsmasq", ["--test", "-C", Config.conf_path(tmp_dir, "eth1")],
-        stderr_to_stdout: true
-      )
+    # dnsmasq --test doesn't read the options file, so check its lines as dhcp-option
+    {_path, options} = Config.runtime_file(:options, config.dnsmasq, tmp_dir, "eth1")
+    options_conf = Path.join(tmp_dir, "options.conf")
 
-    assert status == 0, output
+    File.write!(
+      options_conf,
+      for(
+        line <- String.split(options, "\n", trim: true),
+        into: "",
+        do: "dhcp-option=#{line}\n"
+      )
+    )
+
+    for conf <- [Config.conf_path(tmp_dir, "eth1"), options_conf] do
+      {output, status} = System.cmd("dnsmasq", ["--test", "-C", conf], stderr_to_stdout: true)
+      assert status == 0, output
+    end
   end
 end

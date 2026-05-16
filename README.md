@@ -49,6 +49,11 @@ The following fields are supported:
 * `:static_leases` - `{mac, ip}` or `{mac, ip, hostname}` tuples with infinite
   leases
 * `:records` - `{name, ip}` pairs, including their subdomains
+* `:options` - DHCP options, as in `VintageNet.IP.DhcpdConfig`. dnsmasq sends
+  its own address as the router and DNS server unless `:router` or `:dns` is
+  set, and `[]` sends neither. Integer options are passed to dnsmasq unmodified,
+  so they use its `--dhcp-option` format, such as `43 => "4d:53:46:54"`, and
+  dnsmasq logs and skips values it can't parse
 * `:hosts_dir` - an absolute path to a directory of `dhcp-host` files. New files
   are read automatically
 
@@ -56,15 +61,20 @@ Don't combine `:dnsmasq` with `:dhcpd` or `:dnsd` on the same interface.
 Static leases must have unique MAC and IP addresses and cannot use the server's
 address or the subnet's network or broadcast address.
 
-## Changing leases at runtime
+## Changing leases and options at runtime
 
-To change the static leases without reconfiguring the interface, run:
+To change the static leases or DHCP options without reconfiguring the
+interface, run:
 
 ```elixir
 VintageNet.ioctl("eth1", :static_leases, [[{"aa:bb:cc:dd:ee:ff", "192.168.24.100"}]])
+VintageNet.ioctl("eth1", :options, [%{router: []}])
 ```
 
-DHCP must already be enabled through a range, static leases, or `:hosts_dir`.
+Clients get the new options when they next renew their lease.
+
+Static leases need DHCP to be enabled through a range, static leases, or
+`:hosts_dir`.
 A DNS-only configuration returns `{:error, :dhcp_disabled}`; use
 `VintageNet.configure/2` to enable DHCP first.
 
@@ -75,7 +85,7 @@ one, run:
 VintageNet.ioctl("eth1", :reload)
 ```
 
-Leases set this way last until VintageNet rewrites the interface's files, for
+Values set this way last until VintageNet rewrites the interface's files, for
 example when its configuration changes, VintageNet restarts, or the device
 reboots. dnsmasq reports every lease again as an `"old"` event when it reloads.
 

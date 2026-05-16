@@ -68,18 +68,21 @@ defmodule Dnsmasqex do
     end
   end
 
-  defp run_ioctl(ifname, :static_leases, [leases], %{dnsmasq: dnsmasq} = config) do
-    %{dnsmasq: %{static_leases: static_leases}} =
-      Config.normalize(%{config | dnsmasq: %{dnsmasq | static_leases: leases}})
+  @runtime_options Config.runtime_options()
 
-    if Config.dhcp_enabled?(dnsmasq) do
+  defp run_ioctl(ifname, option, [value], %{dnsmasq: dnsmasq} = config)
+       when option in @runtime_options do
+    %{dnsmasq: new_dnsmasq} =
+      Config.normalize(%{config | dnsmasq: Map.put(dnsmasq, option, value)})
+
+    if option == :static_leases and not Config.dhcp_enabled?(dnsmasq) do
+      {:error, :dhcp_disabled}
+    else
       :global.trans(
         {{__MODULE__, ifname}, self()},
-        fn -> update_static_leases(ifname, static_leases) end,
+        fn -> update_runtime_file(ifname, option, new_dnsmasq) end,
         [node()]
       )
-    else
-      {:error, :dhcp_disabled}
     end
   rescue
     e in ArgumentError -> {:error, Exception.message(e)}
@@ -92,19 +95,14 @@ defmodule Dnsmasqex do
   defp run_ioctl(ifname, command, args, %{technology: technology}),
     do: technology.ioctl(ifname, command, args)
 
-  defp update_static_leases(ifname, static_leases) do
-    with {:ok, pid} <- running_dnsmasq(ifname),
-         :ok <- write_hosts(ifname, static_leases) do
-      reload(pid)
-    end
-  end
-
-  defp write_hosts(ifname, static_leases) do
-    path = Config.hosts_path(tmpdir(), ifname)
+  defp update_runtime_file(ifname, option, dnsmasq) do
+    {path, contents} = Config.runtime_file(option, dnsmasq, tmpdir(), ifname)
     temporary_path = path <> ".new"
 
-    with :ok <- File.write(temporary_path, Config.hosts_contents(static_leases)) do
-      File.rename(temporary_path, path)
+    with {:ok, pid} <- running_dnsmasq(ifname),
+         :ok <- File.write(temporary_path, contents),
+         :ok <- File.rename(temporary_path, path) do
+      reload(pid)
     end
   end
 

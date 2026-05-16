@@ -12,6 +12,16 @@ defmodule Dnsmasqex.Config do
   * `:static_leases` - `{mac, ip}` or `{mac, ip, hostname}` tuples with
     infinite leases
   * `:records` - `{name, ip}` pairs, including their subdomains
+  * `:options` - a map of DHCP options to send, like `VintageNet.IP.DhcpdConfig`:
+    * `:dns`, `:router`, `:ntp` - IP lists. dnsmasq sends its own address as
+      the DNS server and router unless they're set; `[]` sends neither
+    * `:domain`, `:hostname` - strings
+    * `:search` - a list of search domains
+    * `:mtu` - an integer
+    * `:serverid`, `:subnet` or `:netmask` - accepted when they match the
+      interface, since dnsmasq always sends its own
+    * integers - option numbers whose value is passed to dnsmasq unmodified,
+      so use dnsmasq's format, for example `43 => "4d:53:46:54"`
   * `:hosts_dir` - an absolute path to a directory of `dhcp-host` files. New
     files are read automatically
 
@@ -24,6 +34,11 @@ defmodule Dnsmasqex.Config do
   alias Dnsmasqex.Daemon
   alias Dnsmasqex.Notifications
 
+  @runtime_options [:static_leases, :options]
+
+  @typedoc false
+  @type runtime_option :: :static_leases | :options
+
   @doc """
   Normalize the `:dnsmasq` options
   """
@@ -35,12 +50,13 @@ defmodule Dnsmasqex.Config do
 
     new_dnsmasq =
       dnsmasq
-      |> Map.take([:start, :end, :lease_time, :static_leases, :records, :hosts_dir])
+      |> Map.take([:start, :end, :lease_time, :static_leases, :records, :options, :hosts_dir])
       |> normalize_range(ipv4)
       |> check_lease_time()
       |> check_hosts_dir()
       |> Map.update(:static_leases, [], &normalize_leases(&1, ipv4))
       |> Map.update(:records, [], &normalize_records/1)
+      |> Map.update(:options, %{}, &normalize_options(&1, ipv4))
 
     %{config | dnsmasq: new_dnsmasq}
   end
@@ -202,6 +218,70 @@ defmodule Dnsmasqex.Config do
   defp normalize_record(record),
     do: raise(ArgumentError, "Invalid dnsmasq record #{inspect(record)}")
 
+  @ip_list_options [:dns, :router, :ntp]
+  @list_options [:search | @ip_list_options]
+
+  defp normalize_options(options, ipv4) when is_map(options),
+    do: Map.new(options, &normalize_option(&1, ipv4))
+
+  defp normalize_options(options, _ipv4),
+    do: raise(ArgumentError, "Expected a map for dnsmasq :options, got: #{inspect(options)}")
+
+  defp normalize_option({:netmask, mask}, ipv4), do: normalize_option({:subnet, mask}, ipv4)
+
+  defp normalize_option({:subnet, mask}, ipv4) do
+    if ipv4!(mask) == IP.prefix_length_to_subnet_mask(:inet, ipv4.prefix_length) do
+      {:subnet, ipv4!(mask)}
+    else
+      raise ArgumentError, "dnsmasq :subnet must match the interface's prefix length"
+    end
+  end
+
+  defp normalize_option({:serverid, ip}, ipv4) do
+    if ipv4!(ip) == ipv4.address do
+      {:serverid, ipv4.address}
+    else
+      raise ArgumentError, "dnsmasq :serverid must be the interface's address"
+    end
+  end
+
+  defp normalize_option({option, ips}, _ipv4) when option in @ip_list_options and is_list(ips),
+    do: {option, Enum.map(ips, &ipv4!/1)}
+
+  defp normalize_option({:search, names}, _ipv4) when is_list(names),
+    do: {:search, Enum.map(names, &dns_name!/1)}
+
+  defp normalize_option({option, one_item}, ipv4) when option in @list_options,
+    do: normalize_option({option, [one_item]}, ipv4)
+
+  defp normalize_option({option, name}, _ipv4) when option in [:domain, :hostname],
+    do: {option, dns_name!(name)}
+
+  defp normalize_option({:mtu, mtu}, _ipv4) when mtu in 68..65_535, do: {:mtu, mtu}
+
+  defp normalize_option({number, value}, _ipv4) when number in 1..254 and is_binary(value) do
+    if String.contains?(value, ["\n", "\r", "\0"]) do
+      raise ArgumentError, "Invalid dnsmasq option #{number} value #{inspect(value)}"
+    end
+
+    {number, value}
+  end
+
+  defp normalize_option(option, _ipv4),
+    do: raise(ArgumentError, "Invalid dnsmasq option #{inspect(option)}")
+
+  defp dns_name!(name) when is_binary(name) and byte_size(name) <= 253 do
+    label = ~r/\A[[:alnum:]_]([[:alnum:]_-]{0,61}[[:alnum:]_])?\z/
+
+    if name |> String.split(".") |> Enum.all?(&(&1 =~ label)) do
+      name
+    else
+      raise ArgumentError, "Invalid DNS name #{inspect(name)}"
+    end
+  end
+
+  defp dns_name!(name), do: raise(ArgumentError, "Invalid DNS name #{inspect(name)}")
+
   defp ipv4!(ip) do
     case IP.ip_to_tuple(ip) do
       {:ok, {a, b, c, d} = ip}
@@ -267,14 +347,16 @@ defmodule Dnsmasqex.Config do
 
     %{
       raw_config
-      | files: [
-          {conf_path(tmpdir, ifname), dnsmasq_contents(dnsmasq, ifname, ipv4, tmpdir)},
-          {hosts_path(tmpdir, ifname), hosts_contents(dnsmasq.static_leases)} | raw_config.files
-        ],
-        cleanup_files: [
-          pid_path(tmpdir, ifname),
-          hosts_path(tmpdir, ifname) <> ".new" | raw_config.cleanup_files
-        ],
+      | files:
+          [
+            {conf_path(tmpdir, ifname), dnsmasq_contents(dnsmasq, ifname, ipv4, tmpdir)}
+            | Enum.map(@runtime_options, &runtime_file(&1, dnsmasq, tmpdir, ifname))
+          ] ++ raw_config.files,
+        cleanup_files:
+          [
+            pid_path(tmpdir, ifname)
+            | Enum.map(@runtime_options, &(runtime_path(&1, tmpdir, ifname) <> ".new"))
+          ] ++ raw_config.cleanup_files,
         child_specs: raw_config.child_specs ++ [notifier, daemon],
         down_cmds: raw_config.down_cmds ++ [{:fun, Notifications, :clear, [ifname]}]
     }
@@ -296,7 +378,8 @@ defmodule Dnsmasqex.Config do
       "script-arp",
       "script-on-renewal",
       dhcp_range(dnsmasq, ipv4),
-      "dhcp-hostsfile=#{hosts_path(tmpdir, ifname)}",
+      "dhcp-hostsfile=#{runtime_path(:static_leases, tmpdir, ifname)}",
+      "dhcp-optsfile=#{runtime_path(:options, tmpdir, ifname)}",
       hosts_dir(dnsmasq),
       Enum.map(dnsmasq.records, fn {name, ip} -> "address=/#{name}/#{IP.ip_to_string(ip)}" end)
     ]
@@ -336,11 +419,42 @@ defmodule Dnsmasqex.Config do
   defp hosts_dir(_dnsmasq), do: []
 
   @doc false
-  @spec hosts_contents([tuple()]) :: String.t()
-  def hosts_contents(static_leases), do: Enum.map_join(static_leases, &host_line/1)
+  @spec runtime_options() :: [runtime_option(), ...]
+  def runtime_options(), do: @runtime_options
+
+  @doc false
+  @spec runtime_file(runtime_option(), map(), Path.t(), VintageNet.ifname()) ::
+          {Path.t(), String.t()}
+  def runtime_file(key, dnsmasq, tmpdir, ifname),
+    do: {runtime_path(key, tmpdir, ifname), runtime_contents(key, Map.fetch!(dnsmasq, key))}
+
+  defp runtime_contents(:static_leases, leases), do: Enum.map_join(leases, &host_line/1)
+
+  defp runtime_contents(:options, options),
+    do: options |> Enum.sort() |> Enum.map_join(&option_line/1)
 
   defp host_line({mac, ip}), do: "#{mac},#{IP.ip_to_string(ip)},infinite\n"
   defp host_line({mac, ip, hostname}), do: "#{mac},#{IP.ip_to_string(ip)},#{hostname},infinite\n"
+
+  defp option_line({option, _value}) when option in [:serverid, :subnet], do: ""
+  defp option_line({number, ""}) when is_integer(number), do: "#{number}\n"
+  defp option_line({number, value}) when is_integer(number), do: "#{number},#{value}\n"
+  defp option_line({:mtu, mtu}), do: "option:mtu,#{mtu}\n"
+
+  defp option_line({option, values}) when is_list(values),
+    do: Enum.map_join([dnsmasq_option(option) | values], ",", &value_string/1) <> "\n"
+
+  defp option_line({option, name}), do: "#{dnsmasq_option(option)},#{name}\n"
+
+  defp dnsmasq_option(:dns), do: "option:dns-server"
+  defp dnsmasq_option(:router), do: "option:router"
+  defp dnsmasq_option(:ntp), do: "option:ntp-server"
+  defp dnsmasq_option(:search), do: "option:domain-search"
+  defp dnsmasq_option(:domain), do: "option:domain-name"
+  defp dnsmasq_option(:hostname), do: "12"
+
+  defp value_string(value) when is_tuple(value), do: IP.ip_to_string(value)
+  defp value_string(value), do: value
 
   @doc false
   @spec conf_path(Path.t(), VintageNet.ifname()) :: Path.t()
@@ -351,8 +465,11 @@ defmodule Dnsmasqex.Config do
   def pid_path(tmpdir, ifname), do: Path.join(tmpdir, "dnsmasq.#{ifname}.pid")
 
   @doc false
-  @spec hosts_path(Path.t(), VintageNet.ifname()) :: Path.t()
-  def hosts_path(tmpdir, ifname), do: Path.join(tmpdir, "dnsmasq.#{ifname}.hosts")
+  @spec runtime_path(runtime_option(), Path.t(), VintageNet.ifname()) :: Path.t()
+  def runtime_path(:static_leases, tmpdir, ifname),
+    do: Path.join(tmpdir, "dnsmasq.#{ifname}.hosts")
+
+  def runtime_path(:options, tmpdir, ifname), do: Path.join(tmpdir, "dnsmasq.#{ifname}.options")
 
   defp lease_path(tmpdir, ifname), do: Path.join(tmpdir, "dnsmasq.#{ifname}.leases")
 

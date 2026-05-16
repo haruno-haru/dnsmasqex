@@ -113,4 +113,52 @@ defmodule Dnsmasqex.ConfigTest do
       end
     end
   end
+
+  describe "options" do
+    defp options(options),
+      do: Config.normalize(%{@config | dnsmasq: %{options: options}}).dnsmasq.options
+
+    test "normalizes like VintageNet's DHCP server options" do
+      assert options(%{
+               252 => "\"http://192.168.24.1/wpad.dat\"",
+               dns: "192.168.24.1",
+               router: [],
+               ntp: [{192, 168, 24, 1}, "192.168.24.2"],
+               search: "lan",
+               domain: "lan",
+               netmask: "255.255.255.0",
+               serverid: "192.168.24.1",
+               mtu: 1400
+             }) == %{
+               252 => "\"http://192.168.24.1/wpad.dat\"",
+               dns: [{192, 168, 24, 1}],
+               router: [],
+               ntp: [{192, 168, 24, 1}, {192, 168, 24, 2}],
+               search: ["lan"],
+               domain: "lan",
+               subnet: {255, 255, 255, 0},
+               serverid: {192, 168, 24, 1},
+               mtu: 1400
+             }
+    end
+
+    test "rejects options dnsmasq would override or misread" do
+      for options <- [
+            %{subnet: "255.255.0.0"},
+            %{serverid: "192.168.24.2"},
+            %{dns: ["fd00::1"]},
+            %{search: ["bad name"]},
+            %{domain: "lan\ndhcp-script=/tmp/x"},
+            %{mtu: 67},
+            %{0 => "00"},
+            %{255 => "00"},
+            %{43 => "4d:53\ndhcp-script=/tmp/x"},
+            %{43 => 1},
+            %{unknown: "value"},
+            [dns: "192.168.24.1"]
+          ] do
+        assert_raise ArgumentError, fn -> options(options) end
+      end
+    end
+  end
 end
