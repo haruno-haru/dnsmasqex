@@ -54,6 +54,10 @@ The following fields are supported:
   set, and `[]` sends neither. Integer options are passed to dnsmasq unmodified,
   so they use its `--dhcp-option` format, such as `43 => "4d:53:46:54"`, and
   dnsmasq logs and skips values it can't parse
+* `:name_servers` - upstream DNS servers. Without it, dnsmasq follows the name
+  servers VintageNet writes to `/etc/resolv.conf`. `[]` forwards nothing
+* `:forward_domains` - `{domain, servers}` pairs that forward a domain and its
+  subdomains to their own servers. `[]` answers them only from local names
 * `:hosts_dir` - an absolute path to a directory of `dhcp-host` files. New files
   are read automatically
 

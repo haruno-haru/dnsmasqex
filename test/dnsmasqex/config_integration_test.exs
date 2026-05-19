@@ -31,6 +31,11 @@ defmodule Dnsmasqex.ConfigIntegrationTest do
              mtu: 1400
            }
          }},
+        {"upstream DNS",
+         %{
+           name_servers: ["1.1.1.1", "2606:4700:4700::1111"],
+           forward_domains: [{"corp.example.com", ["10.0.0.53"]}, {"lan", []}]
+         }},
         {"static DHCP",
          %{static_leases: [{"aa:bb:cc:dd:ee:ff", "192.168.24.100", "printer"}], lease_time: 3600}}
       ] do

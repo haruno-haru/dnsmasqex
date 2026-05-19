@@ -138,6 +138,34 @@ defmodule DnsmasqexTest do
     assert contents =~ "dhcp-range=192.168.24.0,static\n"
   end
 
+  test "follows /etc/resolv.conf unless name servers are set" do
+    refute dnsmasq_conf(@config) =~ "resolv"
+
+    contents =
+      dnsmasq_conf(%{
+        @config
+        | dnsmasq: %{
+            name_servers: ["1.1.1.1", "2606:4700:4700::1111"],
+            forward_domains: [
+              {"corp.example.com", ["10.0.0.53", "10.0.0.54"]},
+              {"lan", []}
+            ]
+          }
+      })
+
+    assert contents =~ """
+           no-hosts
+           no-resolv
+           server=1.1.1.1
+           server=2606:4700:4700::1111
+           server=/corp.example.com/10.0.0.53
+           server=/corp.example.com/10.0.0.54
+           server=/lan/
+           """
+
+    assert dnsmasq_conf(%{@config | dnsmasq: %{name_servers: []}}) =~ "no-hosts\nno-resolv\n"
+  end
+
   test "supports infinite leases" do
     contents = dnsmasq_conf(put_in(@config, [:dnsmasq, :lease_time], :infinite))
     assert contents =~ "dhcp-range=192.168.24.10,192.168.24.99,infinite\n"

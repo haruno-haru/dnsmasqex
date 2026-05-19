@@ -22,10 +22,12 @@ defmodule Dnsmasqex.Config do
       interface, since dnsmasq always sends its own
     * integers - option numbers whose value is passed to dnsmasq unmodified,
       so use dnsmasq's format, for example `43 => "4d:53:46:54"`
+  * `:name_servers` - upstream DNS servers. Without it, dnsmasq follows the name
+    servers VintageNet writes to `/etc/resolv.conf`. `[]` forwards nothing
+  * `:forward_domains` - `{domain, servers}` pairs that forward a domain and its
+    subdomains to their own servers. `[]` answers them only from local names
   * `:hosts_dir` - an absolute path to a directory of `dhcp-host` files. New
     files are read automatically
-
-  Other names are forwarded to the name servers in `/etc/resolv.conf`.
   """
 
   alias VintageNet.Command
@@ -50,13 +52,25 @@ defmodule Dnsmasqex.Config do
 
     new_dnsmasq =
       dnsmasq
-      |> Map.take([:start, :end, :lease_time, :static_leases, :records, :options, :hosts_dir])
+      |> Map.take([
+        :start,
+        :end,
+        :lease_time,
+        :static_leases,
+        :records,
+        :options,
+        :name_servers,
+        :forward_domains,
+        :hosts_dir
+      ])
       |> normalize_range(ipv4)
       |> check_lease_time()
       |> check_hosts_dir()
       |> Map.update(:static_leases, [], &normalize_leases(&1, ipv4))
       |> Map.update(:records, [], &normalize_records/1)
       |> Map.update(:options, %{}, &normalize_options(&1, ipv4))
+      |> normalize_name_servers()
+      |> Map.update(:forward_domains, [], &normalize_forward_domains/1)
 
     %{config | dnsmasq: new_dnsmasq}
   end
@@ -270,6 +284,32 @@ defmodule Dnsmasqex.Config do
   defp normalize_option(option, _ipv4),
     do: raise(ArgumentError, "Invalid dnsmasq option #{inspect(option)}")
 
+  defp normalize_name_servers(%{name_servers: servers} = dnsmasq),
+    do: %{dnsmasq | name_servers: ip_list!(servers)}
+
+  defp normalize_name_servers(dnsmasq), do: dnsmasq
+
+  defp normalize_forward_domains(domains) when is_list(domains),
+    do: Enum.map(domains, &normalize_forward_domain/1)
+
+  defp normalize_forward_domains(domains),
+    do: raise(ArgumentError, "Expected a list for :forward_domains, got: #{inspect(domains)}")
+
+  defp normalize_forward_domain({domain, servers}), do: {dns_name!(domain), ip_list!(servers)}
+
+  defp normalize_forward_domain(forward),
+    do: raise(ArgumentError, "Invalid dnsmasq forward domain #{inspect(forward)}")
+
+  defp ip_list!(ips) when is_list(ips), do: Enum.map(ips, &ip!/1)
+  defp ip_list!(ip), do: [ip!(ip)]
+
+  defp ip!(ip) do
+    case IP.ip_to_tuple(ip) do
+      {:ok, ip} -> ip
+      {:error, _} -> raise ArgumentError, "Invalid IP address #{inspect(ip)}"
+    end
+  end
+
   defp dns_name!(name) when is_binary(name) and byte_size(name) <= 253 do
     label = ~r/\A[[:alnum:]_]([[:alnum:]_-]{0,61}[[:alnum:]_])?\z/
 
@@ -371,6 +411,7 @@ defmodule Dnsmasqex.Config do
       "listen-address=#{IP.ip_to_string(ipv4.address)}",
       "bind-interfaces",
       "no-hosts",
+      upstream(dnsmasq),
       "user=root",
       "pid-file=#{pid_path(tmpdir, ifname)}",
       "dhcp-leasefile=#{lease_path(tmpdir, ifname)}",
@@ -385,6 +426,18 @@ defmodule Dnsmasqex.Config do
     ]
     |> List.flatten()
     |> Enum.map_join(&[&1, "\n"])
+  end
+
+  defp upstream(dnsmasq) do
+    resolv = if Map.has_key?(dnsmasq, :name_servers), do: ["no-resolv"], else: []
+    servers = Enum.map(Map.get(dnsmasq, :name_servers, []), &"server=#{IP.ip_to_string(&1)}")
+
+    forwards =
+      for {domain, servers} <- dnsmasq.forward_domains,
+          server <- if(servers == [], do: [""], else: Enum.map(servers, &IP.ip_to_string/1)),
+          do: "server=/#{domain}/#{server}"
+
+    resolv ++ servers ++ forwards
   end
 
   defp dhcp_range(%{start: first, end: last} = dnsmasq, _ipv4) do

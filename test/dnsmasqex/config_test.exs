@@ -114,6 +114,32 @@ defmodule Dnsmasqex.ConfigTest do
     end
   end
 
+  test "normalizes upstream name servers like VintageNet's IPv4 name servers" do
+    assert %{
+             name_servers: [{1, 1, 1, 1}],
+             forward_domains: [{"corp.example.com", [{10, 0, 0, 53}]}, {"lan", []}]
+           } =
+             Config.normalize(%{
+               @config
+               | dnsmasq: %{
+                   name_servers: "1.1.1.1",
+                   forward_domains: [{"corp.example.com", "10.0.0.53"}, {"lan", []}]
+                 }
+             }).dnsmasq
+  end
+
+  test "rejects invalid upstream name servers" do
+    for dnsmasq <- [
+          %{name_servers: ["dns.example.com"]},
+          %{forward_domains: [{"bad domain", "10.0.0.53"}]},
+          %{forward_domains: [{"corp.example.com", "not an ip"}]},
+          %{forward_domains: %{"corp.example.com" => "10.0.0.53"}},
+          %{forward_domains: ["corp.example.com"]}
+        ] do
+      assert_raise ArgumentError, fn -> Config.normalize(%{@config | dnsmasq: dnsmasq}) end
+    end
+  end
+
   describe "options" do
     defp options(options),
       do: Config.normalize(%{@config | dnsmasq: %{options: options}}).dnsmasq.options
