@@ -26,6 +26,9 @@ defmodule Dnsmasqex.Config do
     servers VintageNet writes to `/etc/resolv.conf`. `[]` forwards nothing
   * `:forward_domains` - `{domain, servers}` pairs that forward a domain and its
     subdomains to their own servers. `[]` answers them only from local names
+  * `:domain` - the local domain. DHCP clients and records without a dot get
+    names in it, clients get it as their domain, and its names are never
+    forwarded
   * `:hosts_dir` - an absolute path to a directory of `dhcp-host` files. New
     files are read automatically
   """
@@ -61,6 +64,7 @@ defmodule Dnsmasqex.Config do
         :options,
         :name_servers,
         :forward_domains,
+        :domain,
         :hosts_dir
       ])
       |> normalize_range(ipv4)
@@ -71,6 +75,7 @@ defmodule Dnsmasqex.Config do
       |> Map.update(:options, %{}, &normalize_options(&1, ipv4))
       |> normalize_name_servers()
       |> Map.update(:forward_domains, [], &normalize_forward_domains/1)
+      |> normalize_domain()
 
     %{config | dnsmasq: new_dnsmasq}
   end
@@ -289,6 +294,9 @@ defmodule Dnsmasqex.Config do
 
   defp normalize_name_servers(dnsmasq), do: dnsmasq
 
+  defp normalize_domain(%{domain: domain} = dnsmasq), do: %{dnsmasq | domain: dns_name!(domain)}
+  defp normalize_domain(dnsmasq), do: dnsmasq
+
   defp normalize_forward_domains(domains) when is_list(domains),
     do: Enum.map(domains, &normalize_forward_domain/1)
 
@@ -412,6 +420,7 @@ defmodule Dnsmasqex.Config do
       "bind-interfaces",
       "no-hosts",
       upstream(dnsmasq),
+      local_domain(dnsmasq),
       "user=root",
       "pid-file=#{pid_path(tmpdir, ifname)}",
       "dhcp-leasefile=#{lease_path(tmpdir, ifname)}",
@@ -439,6 +448,11 @@ defmodule Dnsmasqex.Config do
 
     resolv ++ servers ++ forwards
   end
+
+  defp local_domain(%{domain: domain}),
+    do: ["domain=#{domain}", "local=/#{domain}/", "expand-hosts"]
+
+  defp local_domain(_dnsmasq), do: []
 
   defp dhcp_range(%{start: first, end: last} = dnsmasq, _ipv4) do
     range_line([IP.ip_to_string(first), IP.ip_to_string(last)], dnsmasq)

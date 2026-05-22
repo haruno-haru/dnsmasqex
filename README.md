@@ -58,6 +58,8 @@ The following fields are supported:
   servers VintageNet writes to `/etc/resolv.conf`. `[]` forwards nothing
 * `:forward_domains` - `{domain, servers}` pairs that forward a domain and its
   subdomains to their own servers. `[]` answers them only from local names
+* `:domain` - the local domain. DHCP clients and records without a dot get
+  names in it, clients get it as their domain, and its names are never forwarded
 * `:hosts_dir` - an absolute path to a directory of `dhcp-host` files. New files
   are read automatically
 

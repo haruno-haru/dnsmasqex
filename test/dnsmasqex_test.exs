@@ -166,6 +166,18 @@ defmodule DnsmasqexTest do
     assert dnsmasq_conf(%{@config | dnsmasq: %{name_servers: []}}) =~ "no-hosts\nno-resolv\n"
   end
 
+  test "answers the local domain without forwarding it" do
+    assert dnsmasq_conf(%{@config | dnsmasq: %{domain: "lan"}}) =~ """
+           domain=lan
+           local=/lan/
+           expand-hosts
+           """
+
+    assert_raise ArgumentError, fn ->
+      Dnsmasqex.normalize(%{@config | dnsmasq: %{domain: "lan\nconf-file=/tmp/x"}})
+    end
+  end
+
   test "supports infinite leases" do
     contents = dnsmasq_conf(put_in(@config, [:dnsmasq, :lease_time], :infinite))
     assert contents =~ "dhcp-range=192.168.24.10,192.168.24.99,infinite\n"
