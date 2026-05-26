@@ -11,7 +11,16 @@ defmodule Dnsmasqex.Config do
   * `:lease_time` - seconds, from 120 to 4_294_967_294, or `:infinite`
   * `:static_leases` - `{mac, ip}` or `{mac, ip, hostname}` tuples with
     infinite leases
-  * `:records` - `{name, ip}` pairs, including their subdomains
+  * `:records` - `{name, ip}` pairs for exactly those names, like `:dnsd`
+  * `:domain_records` - `{domain, ip}` pairs that also answer every subdomain.
+    The domain may use dnsmasq's patterns, such as `"*.example.com"` for only
+    the subdomains, or be `"#"` for every name not found elsewhere
+  * `:cnames` - `{alias, target}` pairs. dnsmasq only answers them when it
+    knows the target from records or DHCP
+  * `:srv_records` - `{name, target, port}` or
+    `{name, target, port, priority, weight}` tuples
+  * `:txt_records` - `{name, text}` or `{name, [text]}` pairs
+  * `:mx_records` - `{name, target}` or `{name, target, preference}` tuples
   * `:options` - a map of DHCP options to send, like `VintageNet.IP.DhcpdConfig`:
     * `:dns`, `:router`, `:ntp` - IP lists. dnsmasq sends its own address as
       the DNS server and router unless they're set; `[]` sends neither
@@ -39,10 +48,10 @@ defmodule Dnsmasqex.Config do
   alias Dnsmasqex.Daemon
   alias Dnsmasqex.Notifications
 
-  @runtime_options [:static_leases, :options]
+  @runtime_options [:static_leases, :options, :records]
 
   @typedoc false
-  @type runtime_option :: :static_leases | :options
+  @type runtime_option :: :static_leases | :options | :records
 
   @doc """
   Normalize the `:dnsmasq` options
@@ -61,6 +70,11 @@ defmodule Dnsmasqex.Config do
         :lease_time,
         :static_leases,
         :records,
+        :domain_records,
+        :cnames,
+        :srv_records,
+        :txt_records,
+        :mx_records,
         :options,
         :name_servers,
         :forward_domains,
@@ -71,10 +85,15 @@ defmodule Dnsmasqex.Config do
       |> check_lease_time()
       |> check_hosts_dir()
       |> Map.update(:static_leases, [], &normalize_leases(&1, ipv4))
-      |> Map.update(:records, [], &normalize_records/1)
+      |> update_list(:records, &normalize_record/1)
+      |> update_list(:domain_records, &normalize_domain_record/1)
+      |> update_list(:cnames, &normalize_cname/1)
+      |> update_list(:srv_records, &normalize_srv/1)
+      |> update_list(:txt_records, &normalize_txt/1)
+      |> update_list(:mx_records, &normalize_mx/1)
       |> Map.update(:options, %{}, &normalize_options(&1, ipv4))
       |> normalize_name_servers()
-      |> Map.update(:forward_domains, [], &normalize_forward_domains/1)
+      |> update_list(:forward_domains, &normalize_forward_domain/1)
       |> normalize_domain()
 
     %{config | dnsmasq: new_dnsmasq}
@@ -213,29 +232,58 @@ defmodule Dnsmasqex.Config do
 
   defp check_hostname(hostname), do: raise(ArgumentError, "Invalid hostname #{inspect(hostname)}")
 
-  defp normalize_records(records) when is_list(records),
-    do: Enum.map(records, &normalize_record/1)
-
-  defp normalize_records(records),
-    do: raise(ArgumentError, "Expected a list for :records, got: #{inspect(records)}")
-
-  defp normalize_record({name, ip}) when is_binary(name) do
-    domain =
-      name
-      |> String.replace_prefix("*", "")
-      |> String.trim_leading(".")
-      |> String.trim_trailing(".")
-
-    if name =~ ~r/\A[^\s\x00-\x1f\x7f\/#"]+\z/ and byte_size(domain) <= 253 and
-         (domain == "" or Enum.all?(String.split(domain, "."), &(byte_size(&1) in 1..63))) do
-      {name, ipv4!(ip)}
-    else
-      raise ArgumentError, "Invalid dnsmasq record name #{inspect(name)}"
-    end
+  defp update_list(dnsmasq, key, fun) do
+    Map.update(dnsmasq, key, [], fn
+      list when is_list(list) -> Enum.map(list, fun)
+      other -> raise ArgumentError, "Expected a list for #{inspect(key)}, got: #{inspect(other)}"
+    end)
   end
+
+  defp normalize_record({name, ip}), do: {dns_name!(name), ip!(ip)}
 
   defp normalize_record(record),
     do: raise(ArgumentError, "Invalid dnsmasq record #{inspect(record)}")
+
+  defp normalize_domain_record({"#", ip}), do: {"#", ip!(ip)}
+  defp normalize_domain_record({pattern, ip}), do: {domain_pattern!(pattern), ip!(ip)}
+
+  defp normalize_domain_record(record),
+    do: raise(ArgumentError, "Invalid dnsmasq domain record #{inspect(record)}")
+
+  defp normalize_cname({name, target}), do: {dns_name!(name), dns_name!(target)}
+  defp normalize_cname(cname), do: raise(ArgumentError, "Invalid dnsmasq CNAME #{inspect(cname)}")
+
+  defp normalize_srv({name, target, port}) when port in 0..65_535,
+    do: {dns_name!(name), dns_name!(target), port}
+
+  defp normalize_srv({name, target, port, priority, weight})
+       when port in 0..65_535 and priority in 0..65_535 and weight in 0..65_535,
+       do: {dns_name!(name), dns_name!(target), port, priority, weight}
+
+  defp normalize_srv(srv), do: raise(ArgumentError, "Invalid dnsmasq SRV record #{inspect(srv)}")
+
+  defp normalize_txt({name, texts}) when is_list(texts),
+    do: {dns_name!(name), Enum.map(texts, &text!/1)}
+
+  defp normalize_txt({name, text}), do: normalize_txt({name, [text]})
+  defp normalize_txt(txt), do: raise(ArgumentError, "Invalid dnsmasq TXT record #{inspect(txt)}")
+
+  defp text!(text) when is_binary(text) and byte_size(text) <= 255 do
+    if text =~ ~r/\A[^\x00-\x1f\x7f]*\z/ do
+      text
+    else
+      raise ArgumentError, "Invalid dnsmasq TXT string #{inspect(text)}"
+    end
+  end
+
+  defp text!(text), do: raise(ArgumentError, "Invalid dnsmasq TXT string #{inspect(text)}")
+
+  defp normalize_mx({name, target}), do: {dns_name!(name), dns_name!(target)}
+
+  defp normalize_mx({name, target, preference}) when preference in 0..65_535,
+    do: {dns_name!(name), dns_name!(target), preference}
+
+  defp normalize_mx(mx), do: raise(ArgumentError, "Invalid dnsmasq MX record #{inspect(mx)}")
 
   @ip_list_options [:dns, :router, :ntp]
   @list_options [:search | @ip_list_options]
@@ -297,13 +345,8 @@ defmodule Dnsmasqex.Config do
   defp normalize_domain(%{domain: domain} = dnsmasq), do: %{dnsmasq | domain: dns_name!(domain)}
   defp normalize_domain(dnsmasq), do: dnsmasq
 
-  defp normalize_forward_domains(domains) when is_list(domains),
-    do: Enum.map(domains, &normalize_forward_domain/1)
-
-  defp normalize_forward_domains(domains),
-    do: raise(ArgumentError, "Expected a list for :forward_domains, got: #{inspect(domains)}")
-
-  defp normalize_forward_domain({domain, servers}), do: {dns_name!(domain), ip_list!(servers)}
+  defp normalize_forward_domain({domain, servers}),
+    do: {domain_pattern!(domain), ip_list!(servers)}
 
   defp normalize_forward_domain(forward),
     do: raise(ArgumentError, "Invalid dnsmasq forward domain #{inspect(forward)}")
@@ -318,17 +361,35 @@ defmodule Dnsmasqex.Config do
     end
   end
 
-  defp dns_name!(name) when is_binary(name) and byte_size(name) <= 253 do
-    label = ~r/\A[[:alnum:]_]([[:alnum:]_-]{0,61}[[:alnum:]_])?\z/
+  # dnsmasq's domain patterns: "*" matches within the first label, a leading "."
+  # only the subdomains
+  defp domain_pattern!(pattern) when is_binary(pattern) do
+    domain =
+      pattern
+      |> String.replace_prefix("*", "")
+      |> String.replace_prefix(".", "")
+      |> String.replace_suffix(".", "")
 
-    if name |> String.split(".") |> Enum.all?(&(&1 =~ label)) do
-      name
+    if domain == "" or dns_name?(domain) do
+      pattern
     else
-      raise ArgumentError, "Invalid DNS name #{inspect(name)}"
+      raise ArgumentError, "Invalid dnsmasq domain pattern #{inspect(pattern)}"
     end
   end
 
-  defp dns_name!(name), do: raise(ArgumentError, "Invalid DNS name #{inspect(name)}")
+  defp domain_pattern!(pattern),
+    do: raise(ArgumentError, "Invalid dnsmasq domain pattern #{inspect(pattern)}")
+
+  defp dns_name!(name) do
+    if dns_name?(name), do: name, else: raise(ArgumentError, "Invalid DNS name #{inspect(name)}")
+  end
+
+  defp dns_name?(name) when is_binary(name) and byte_size(name) <= 253 do
+    label = ~r/\A[[:alnum:]_]([[:alnum:]_-]{0,61}[[:alnum:]_])?\z/
+    name |> String.split(".") |> Enum.all?(&(&1 =~ label))
+  end
+
+  defp dns_name?(_name), do: false
 
   defp ipv4!(ip) do
     case IP.ip_to_tuple(ip) do
@@ -431,7 +492,16 @@ defmodule Dnsmasqex.Config do
       "dhcp-hostsfile=#{runtime_path(:static_leases, tmpdir, ifname)}",
       "dhcp-optsfile=#{runtime_path(:options, tmpdir, ifname)}",
       hosts_dir(dnsmasq),
-      Enum.map(dnsmasq.records, fn {name, ip} -> "address=/#{name}/#{IP.ip_to_string(ip)}" end)
+      "addn-hosts=#{runtime_path(:records, tmpdir, ifname)}",
+      Enum.map(dnsmasq.domain_records, fn {name, ip} ->
+        "address=/#{name}/#{IP.ip_to_string(ip)}"
+      end),
+      Enum.map(dnsmasq.cnames, fn {name, target} -> "cname=#{name},#{target}" end),
+      Enum.map(dnsmasq.srv_records, &("srv-host=" <> Enum.join(Tuple.to_list(&1), ","))),
+      Enum.map(dnsmasq.txt_records, fn {name, texts} ->
+        Enum.join(["txt-record=#{name}" | Enum.map(texts, &quote_text/1)], ",")
+      end),
+      Enum.map(dnsmasq.mx_records, &("mx-host=" <> Enum.join(Tuple.to_list(&1), ",")))
     ]
     |> List.flatten()
     |> Enum.map_join(&[&1, "\n"])
@@ -497,6 +567,9 @@ defmodule Dnsmasqex.Config do
 
   defp runtime_contents(:static_leases, leases), do: Enum.map_join(leases, &host_line/1)
 
+  defp runtime_contents(:records, records),
+    do: Enum.map_join(records, fn {name, ip} -> "#{IP.ip_to_string(ip)} #{name}\n" end)
+
   defp runtime_contents(:options, options),
     do: options |> Enum.sort() |> Enum.map_join(&option_line/1)
 
@@ -520,6 +593,9 @@ defmodule Dnsmasqex.Config do
   defp dnsmasq_option(:domain), do: "option:domain-name"
   defp dnsmasq_option(:hostname), do: "12"
 
+  defp quote_text(text),
+    do: ~s("#{text |> String.replace("\\", "\\\\") |> String.replace("\"", "\\\"")}")
+
   defp value_string(value) when is_tuple(value), do: IP.ip_to_string(value)
   defp value_string(value), do: value
 
@@ -537,6 +613,7 @@ defmodule Dnsmasqex.Config do
     do: Path.join(tmpdir, "dnsmasq.#{ifname}.hosts")
 
   def runtime_path(:options, tmpdir, ifname), do: Path.join(tmpdir, "dnsmasq.#{ifname}.options")
+  def runtime_path(:records, tmpdir, ifname), do: Path.join(tmpdir, "dnsmasq.#{ifname}.records")
 
   defp lease_path(tmpdir, ifname), do: Path.join(tmpdir, "dnsmasq.#{ifname}.leases")
 

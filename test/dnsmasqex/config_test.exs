@@ -94,8 +94,18 @@ defmodule Dnsmasqex.ConfigTest do
         {name, {192, 168, 24, 1}}
       end
 
-    assert %{dnsmasq: %{records: ^records}} =
-             Config.normalize(%{@config | dnsmasq: %{records: records}})
+    domain_records = [{"#", {192, 168, 24, 1}} | records]
+
+    assert %{dnsmasq: %{domain_records: ^domain_records, forward_domains: forwards}} =
+             Config.normalize(%{
+               @config
+               | dnsmasq: %{
+                   domain_records: domain_records,
+                   forward_domains: Enum.map(records, fn {name, ip} -> {name, [ip]} end)
+                 }
+             })
+
+    assert Enum.map(forwards, &elem(&1, 0)) == Enum.map(records, &elem(&1, 0))
   end
 
   test "rejects paths that dnsmasq would truncate or reinterpret" do
@@ -135,6 +145,24 @@ defmodule Dnsmasqex.ConfigTest do
           %{forward_domains: [{"corp.example.com", "not an ip"}]},
           %{forward_domains: %{"corp.example.com" => "10.0.0.53"}},
           %{forward_domains: ["corp.example.com"]}
+        ] do
+      assert_raise ArgumentError, fn -> Config.normalize(%{@config | dnsmasq: dnsmasq}) end
+    end
+  end
+
+  test "rejects DNS records dnsmasq would misread" do
+    for dnsmasq <- [
+          %{records: [{"*.example.com", "192.168.24.1"}]},
+          %{records: [{"pi.lan", "pi"}]},
+          %{domain_records: [{"bad name", "192.168.24.1"}]},
+          %{cnames: [{"www.lan", "bad,target"}]},
+          %{srv_records: [{"_http._tcp.lan", "pi.lan", 65_536}]},
+          %{srv_records: [{"_http._tcp.lan", "pi.lan", 80, 1}]},
+          %{txt_records: [{"pi.lan", "line\nbreak"}]},
+          %{txt_records: [{"pi.lan", String.duplicate("a", 256)}]},
+          %{txt_records: [{"pi.lan", 1}]},
+          %{mx_records: [{"lan", "mail.lan", -1}]},
+          %{cnames: %{"www.lan" => "pi.lan"}}
         ] do
       assert_raise ArgumentError, fn -> Config.normalize(%{@config | dnsmasq: dnsmasq}) end
     end

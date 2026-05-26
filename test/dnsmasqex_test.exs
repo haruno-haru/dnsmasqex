@@ -73,13 +73,15 @@ defmodule DnsmasqexTest do
     assert raw_config.cleanup_files == [
              "/tmp/vintage_net/dnsmasq.eth1.pid",
              "/tmp/vintage_net/dnsmasq.eth1.hosts.new",
-             "/tmp/vintage_net/dnsmasq.eth1.options.new"
+             "/tmp/vintage_net/dnsmasq.eth1.options.new",
+             "/tmp/vintage_net/dnsmasq.eth1.records.new"
            ]
 
     assert [
              {"/tmp/vintage_net/dnsmasq.conf.eth1", contents},
              {"/tmp/vintage_net/dnsmasq.eth1.hosts", hosts},
-             {"/tmp/vintage_net/dnsmasq.eth1.options", options}
+             {"/tmp/vintage_net/dnsmasq.eth1.options", options},
+             {"/tmp/vintage_net/dnsmasq.eth1.records", records}
            ] = raw_config.files
 
     assert contents == """
@@ -98,7 +100,7 @@ defmodule DnsmasqexTest do
            dhcp-hostsfile=/tmp/vintage_net/dnsmasq.eth1.hosts
            dhcp-optsfile=/tmp/vintage_net/dnsmasq.eth1.options
            dhcp-hostsdir=/data/dnsmasq/hosts
-           address=/device.example.com/192.168.24.1
+           addn-hosts=/tmp/vintage_net/dnsmasq.eth1.records
            """
 
     assert hosts == """
@@ -113,6 +115,8 @@ defmodule DnsmasqexTest do
            option:router
            option:domain-search,lan
            """
+
+    assert records == "192.168.24.1 device.example.com\n"
   end
 
   test "normalizing twice gives the same config" do
@@ -125,7 +129,7 @@ defmodule DnsmasqexTest do
       dnsmasq_conf(%{@config | dnsmasq: %{records: [{"device.example.com", "192.168.24.1"}]}})
 
     refute contents =~ "dhcp-range"
-    assert contents =~ "address=/device.example.com/192.168.24.1"
+    assert contents =~ "addn-hosts="
   end
 
   test "serves only static leases without a range" do
@@ -176,6 +180,34 @@ defmodule DnsmasqexTest do
     assert_raise ArgumentError, fn ->
       Dnsmasqex.normalize(%{@config | dnsmasq: %{domain: "lan\nconf-file=/tmp/x"}})
     end
+  end
+
+  test "writes every kind of DNS record" do
+    contents =
+      dnsmasq_conf(%{
+        @config
+        | dnsmasq: %{
+            domain_records: [{"example.com", "192.168.24.2"}, {"#", "192.168.24.1"}],
+            cnames: [{"www.lan", "pi.lan"}],
+            srv_records: [
+              {"_http._tcp.lan", "pi.lan", 80},
+              {"_ipp._tcp.lan", "printer.lan", 631, 10, 5}
+            ],
+            txt_records: [{"pi.lan", ["v=1", ~s(say "hi" \\ bye)]}],
+            mx_records: [{"lan", "mail.lan"}, {"example.com", "mail.lan", 10}]
+          }
+      })
+
+    assert contents =~ """
+           address=/example.com/192.168.24.2
+           address=/#/192.168.24.1
+           cname=www.lan,pi.lan
+           srv-host=_http._tcp.lan,pi.lan,80
+           srv-host=_ipp._tcp.lan,printer.lan,631,10,5
+           txt-record=pi.lan,"v=1","say \\"hi\\" \\\\ bye"
+           mx-host=lan,mail.lan
+           mx-host=example.com,mail.lan,10
+           """
   end
 
   test "supports infinite leases" do
@@ -234,6 +266,7 @@ defmodule DnsmasqexTest do
       File.mkdir_p!(tmpdir)
       hosts_path = Path.join(tmpdir, "dnsmasq.ioctl0.hosts")
       options_path = Path.join(tmpdir, "dnsmasq.ioctl0.options")
+      records_path = Path.join(tmpdir, "dnsmasq.ioctl0.records")
       pid_path = Path.join(tmpdir, "dnsmasq.ioctl0.pid")
       File.write!(hosts_path, "aa:bb:cc:dd:ee:ff,192.168.24.100,infinite\n")
 
@@ -244,7 +277,8 @@ defmodule DnsmasqexTest do
         PropertyTable.delete(VintageNet, config_property)
 
         Enum.each(
-          [hosts_path, options_path, pid_path, hosts_path <> ".new", options_path <> ".new"],
+          [hosts_path, options_path, records_path, pid_path] ++
+            Enum.map([hosts_path, options_path, records_path], &(&1 <> ".new")),
           &File.rm_rf!/1
         )
       end)
@@ -252,6 +286,7 @@ defmodule DnsmasqexTest do
       %{
         hosts_path: hosts_path,
         options_path: options_path,
+        records_path: records_path,
         pid_path: pid_path,
         conf_path: Path.join(tmpdir, "dnsmasq.conf.ioctl0")
       }
@@ -328,6 +363,23 @@ defmodule DnsmasqexTest do
                Dnsmasqex.ioctl("ioctl0", :options, [%{mtu: 1}])
 
       refute File.exists?(context.options_path)
+    end
+
+    @tag :linux
+    test "rewrites the DNS records without DHCP", context do
+      PropertyTable.put(
+        VintageNet,
+        ["interface", "ioctl0", "config"],
+        Dnsmasqex.normalize(%{@config | dnsmasq: %{}})
+      )
+
+      port = start_process("trap 'echo reloaded' HUP", context.conf_path)
+
+      assert :ok =
+               Dnsmasqex.ioctl("ioctl0", :records, [[{"pi.lan", "192.168.24.1"}]])
+
+      assert File.read!(context.records_path) == "192.168.24.1 pi.lan\n"
+      assert_receive {^port, {:data, "reloaded\n"}}, 3000
     end
 
     @tag :linux

@@ -48,7 +48,16 @@ The following fields are supported:
 * `:lease_time` - seconds, from 120 to 4_294_967_294, or `:infinite`
 * `:static_leases` - `{mac, ip}` or `{mac, ip, hostname}` tuples with infinite
   leases
-* `:records` - `{name, ip}` pairs, including their subdomains
+* `:records` - `{name, ip}` pairs for exactly those names, like `:dnsd`
+* `:domain_records` - `{domain, ip}` pairs that also answer every subdomain. The
+  domain may use dnsmasq's patterns, such as `"*.example.com"` for only the
+  subdomains, or be `"#"` for every name not found elsewhere
+* `:cnames` - `{alias, target}` pairs. dnsmasq only answers them when it knows
+  the target from records or DHCP
+* `:srv_records` - `{name, target, port}` or
+  `{name, target, port, priority, weight}` tuples
+* `:txt_records` - `{name, text}` or `{name, [text]}` pairs
+* `:mx_records` - `{name, target}` or `{name, target, preference}` tuples
 * `:options` - DHCP options, as in `VintageNet.IP.DhcpdConfig`. dnsmasq sends
   its own address as the router and DNS server unless `:router` or `:dns` is
   set, and `[]` sends neither. Integer options are passed to dnsmasq unmodified,
@@ -67,14 +76,15 @@ Don't combine `:dnsmasq` with `:dhcpd` or `:dnsd` on the same interface.
 Static leases must have unique MAC and IP addresses and cannot use the server's
 address or the subnet's network or broadcast address.
 
-## Changing leases and options at runtime
+## Changing leases, options and records at runtime
 
-To change the static leases or DHCP options without reconfiguring the
-interface, run:
+To change the static leases, DHCP options or `:records` without reconfiguring
+the interface, run:
 
 ```elixir
 VintageNet.ioctl("eth1", :static_leases, [[{"aa:bb:cc:dd:ee:ff", "192.168.24.100"}]])
 VintageNet.ioctl("eth1", :options, [%{router: []}])
+VintageNet.ioctl("eth1", :records, [[{"device.example.com", "192.168.24.1"}]])
 ```
 
 Clients get the new options when they next renew their lease.

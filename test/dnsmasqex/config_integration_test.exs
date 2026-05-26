@@ -37,6 +37,19 @@ defmodule Dnsmasqex.ConfigIntegrationTest do
            forward_domains: [{"corp.example.com", ["10.0.0.53"]}, {"lan", []}]
          }},
         {"local domain", %{domain: "lan", start: "192.168.24.10", end: "192.168.24.99"}},
+        {"DNS records",
+         %{
+           domain: "lan",
+           records: [{"pi", "192.168.24.1"}, {"pi6.lan", "fd00::1"}],
+           domain_records: [{"*.example.com", "192.168.24.2"}, {"#", "192.168.24.1"}],
+           cnames: [{"www.lan", "pi.lan"}],
+           srv_records: [
+             {"_http._tcp.lan", "pi.lan", 80},
+             {"_ipp._tcp.lan", "pi.lan", 631, 10, 5}
+           ],
+           txt_records: [{"pi.lan", ["v=1", ~s(say "hi" \\ bye)]}],
+           mx_records: [{"lan", "pi.lan"}, {"example.com", "pi.lan", 10}]
+         }},
         {"static DHCP",
          %{static_leases: [{"aa:bb:cc:dd:ee:ff", "192.168.24.100", "printer"}], lease_time: 3600}}
       ] do
