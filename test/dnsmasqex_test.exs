@@ -210,6 +210,26 @@ defmodule DnsmasqexTest do
            """
   end
 
+  test "keeps leases where configured and answers unknown leases when authoritative" do
+    dnsmasq =
+      Map.merge(@config.dnsmasq, %{authoritative: true, lease_path: "/data/dnsmasq/eth1.leases"})
+
+    raw_config = raw_config(%{@config | dnsmasq: dnsmasq})
+    [{_path, contents} | _] = raw_config.files
+
+    assert contents =~ "dhcp-leasefile=/data/dnsmasq/eth1.leases\n"
+    assert contents =~ "script-on-renewal\ndhcp-authoritative\n"
+    assert raw_config.up_cmds == [:wired_up, {:fun, File, :mkdir_p, ["/data/dnsmasq"]}]
+
+    refute dnsmasq_conf(@config) =~ "dhcp-authoritative"
+
+    for dnsmasq <- [%{authoritative: "yes"}, %{lease_path: "leases"}, %{lease_path: "/data/a\nb"}] do
+      assert_raise ArgumentError, fn ->
+        Dnsmasqex.normalize(%{@config | dnsmasq: dnsmasq})
+      end
+    end
+  end
+
   test "supports infinite leases" do
     contents = dnsmasq_conf(put_in(@config, [:dnsmasq, :lease_time], :infinite))
     assert contents =~ "dhcp-range=192.168.24.10,192.168.24.99,infinite\n"

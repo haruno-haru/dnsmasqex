@@ -60,6 +60,18 @@ defmodule Dnsmasqex.ConfigIntegrationTest do
     end
   end
 
+  test "dnsmasq accepts an authoritative server with its own lease file", %{tmp_dir: tmp_dir} do
+    check_config(
+      %{
+        start: "192.168.24.10",
+        end: "192.168.24.99",
+        authoritative: true,
+        lease_path: Path.join(tmp_dir, "leases/eth1.leases")
+      },
+      tmp_dir
+    )
+  end
+
   test "dnsmasq accepts a hosts directory without an initial lease", %{tmp_dir: tmp_dir} do
     hosts_dir = Path.join(tmp_dir, "hosts directory")
     File.mkdir!(hosts_dir)

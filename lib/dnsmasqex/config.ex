@@ -38,6 +38,11 @@ defmodule Dnsmasqex.Config do
   * `:domain` - the local domain. DHCP clients and records without a dot get
     names in it, clients get it as their domain, and its names are never
     forwarded
+  * `:authoritative` - `true` when dnsmasq is the only DHCP server on the
+    network, so clients with leases it doesn't know get addresses right away
+  * `:lease_path` - an absolute path for the lease file, so leases survive a
+    reboot when it's on a persistent filesystem. Defaults to VintageNet's
+    `:tmpdir`
   * `:hosts_dir` - an absolute path to a directory of `dhcp-host` files. New
     files are read automatically
   """
@@ -79,11 +84,15 @@ defmodule Dnsmasqex.Config do
         :name_servers,
         :forward_domains,
         :domain,
+        :authoritative,
+        :lease_path,
         :hosts_dir
       ])
       |> normalize_range(ipv4)
       |> check_lease_time()
-      |> check_hosts_dir()
+      |> check_path(:hosts_dir)
+      |> check_path(:lease_path)
+      |> check_authoritative()
       |> Map.update(:static_leases, [], &normalize_leases(&1, ipv4))
       |> update_list(:records, &normalize_record/1)
       |> update_list(:domain_records, &normalize_domain_record/1)
@@ -150,19 +159,33 @@ defmodule Dnsmasqex.Config do
 
   defp check_lease_time(dnsmasq), do: dnsmasq
 
-  defp check_hosts_dir(%{hosts_dir: hosts_dir} = dnsmasq) when is_binary(hosts_dir) do
-    if Path.type(hosts_dir) == :absolute and String.trim(hosts_dir) == hosts_dir and
-         not Regex.match?(~r/[\x00-\x1f\x7f"]| #/, hosts_dir) do
-      dnsmasq
-    else
-      raise ArgumentError, "Invalid dnsmasq :hosts_dir #{inspect(hosts_dir)}"
+  defp check_path(dnsmasq, key) do
+    case dnsmasq do
+      %{^key => path} when is_binary(path) ->
+        if Path.type(path) == :absolute and String.trim(path) == path and
+             not Regex.match?(~r/[\x00-\x1f\x7f"]| #/, path) do
+          dnsmasq
+        else
+          raise ArgumentError, "Invalid dnsmasq #{inspect(key)} #{inspect(path)}"
+        end
+
+      %{^key => path} ->
+        raise ArgumentError, "Invalid dnsmasq #{inspect(key)} #{inspect(path)}"
+
+      _ ->
+        dnsmasq
     end
   end
 
-  defp check_hosts_dir(%{hosts_dir: hosts_dir}),
-    do: raise(ArgumentError, "Invalid dnsmasq :hosts_dir #{inspect(hosts_dir)}")
+  defp check_authoritative(%{authoritative: authoritative})
+       when not is_boolean(authoritative),
+       do:
+         raise(
+           ArgumentError,
+           "Expected a boolean for :authoritative, got: #{inspect(authoritative)}"
+         )
 
-  defp check_hosts_dir(dnsmasq), do: dnsmasq
+  defp check_authoritative(dnsmasq), do: dnsmasq
 
   defp normalize_leases(leases, ipv4) when is_list(leases) do
     leases = Enum.map(leases, &normalize_lease(&1, ipv4))
@@ -428,7 +451,7 @@ defmodule Dnsmasqex.Config do
       ifname: ifname,
       address: ipv4.address,
       prefix_length: ipv4.prefix_length,
-      lease_path: lease_path(tmpdir, ifname)
+      lease_path: lease_path(dnsmasq, tmpdir, ifname)
     }
 
     notifier_options = [
@@ -466,12 +489,16 @@ defmodule Dnsmasqex.Config do
             pid_path(tmpdir, ifname)
             | Enum.map(@runtime_options, &(runtime_path(&1, tmpdir, ifname) <> ".new"))
           ] ++ raw_config.cleanup_files,
+        up_cmds: raw_config.up_cmds ++ lease_dir_cmds(dnsmasq),
         child_specs: raw_config.child_specs ++ [notifier, daemon],
         down_cmds: raw_config.down_cmds ++ [{:fun, Notifications, :clear, [ifname]}]
     }
   end
 
   def add_config(raw_config, _config_without_dnsmasq, _opts), do: raw_config
+
+  defp lease_dir_cmds(%{lease_path: path}), do: [{:fun, File, :mkdir_p, [Path.dirname(path)]}]
+  defp lease_dir_cmds(_dnsmasq), do: []
 
   defp dnsmasq_contents(dnsmasq, ifname, ipv4, tmpdir) do
     [
@@ -484,10 +511,11 @@ defmodule Dnsmasqex.Config do
       local_domain(dnsmasq),
       "user=root",
       "pid-file=#{pid_path(tmpdir, ifname)}",
-      "dhcp-leasefile=#{lease_path(tmpdir, ifname)}",
+      "dhcp-leasefile=#{lease_path(dnsmasq, tmpdir, ifname)}",
       "dhcp-script=#{BEAMNotify.bin_path()}",
       "script-arp",
       "script-on-renewal",
+      authoritative(dnsmasq),
       dhcp_range(dnsmasq, ipv4),
       "dhcp-hostsfile=#{runtime_path(:static_leases, tmpdir, ifname)}",
       "dhcp-optsfile=#{runtime_path(:options, tmpdir, ifname)}",
@@ -518,6 +546,9 @@ defmodule Dnsmasqex.Config do
 
     resolv ++ servers ++ forwards
   end
+
+  defp authoritative(%{authoritative: true}), do: "dhcp-authoritative"
+  defp authoritative(_dnsmasq), do: []
 
   defp local_domain(%{domain: domain}),
     do: ["domain=#{domain}", "local=/#{domain}/", "expand-hosts"]
@@ -615,7 +646,8 @@ defmodule Dnsmasqex.Config do
   def runtime_path(:options, tmpdir, ifname), do: Path.join(tmpdir, "dnsmasq.#{ifname}.options")
   def runtime_path(:records, tmpdir, ifname), do: Path.join(tmpdir, "dnsmasq.#{ifname}.records")
 
-  defp lease_path(tmpdir, ifname), do: Path.join(tmpdir, "dnsmasq.#{ifname}.leases")
+  defp lease_path(%{lease_path: path}, _tmpdir, _ifname), do: path
+  defp lease_path(_dnsmasq, tmpdir, ifname), do: Path.join(tmpdir, "dnsmasq.#{ifname}.leases")
 
   @doc false
   @spec dnsmasq_path() :: String.t()
