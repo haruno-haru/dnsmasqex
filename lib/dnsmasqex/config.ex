@@ -10,7 +10,9 @@ defmodule Dnsmasqex.Config do
     them, only static leases get addresses, or only DNS runs if there are none
   * `:lease_time` - seconds, from 120 to 4_294_967_294, or `:infinite`
   * `:static_leases` - `{mac, ip}` or `{mac, ip, hostname}` tuples with
-    infinite leases
+    infinite leases, or maps with a `:mac` and any of `:ip`, `:hostname` and
+    `:lease_time`. A map lease with an `:ip` is infinite unless it has a
+    `:lease_time`, and `%{mac: mac, ignore: true}` never answers that client
   * `:records` - `{name, ip}` pairs for exactly those names, like `:dnsd`
   * `:domain_records` - `{domain, ip}` pairs that also answer every subdomain.
     The domain may use dnsmasq's patterns, such as `"*.example.com"` for only
@@ -149,15 +151,17 @@ defmodule Dnsmasqex.Config do
 
   defp normalize_range(dnsmasq, _ipv4), do: dnsmasq
 
-  defp check_lease_time(%{lease_time: lease_time} = dnsmasq)
-       when lease_time == :infinite or
-              (is_integer(lease_time) and lease_time in 120..0xFFFFFFFE),
-       do: dnsmasq
-
-  defp check_lease_time(%{lease_time: lease_time}),
-    do: raise(ArgumentError, "Invalid dnsmasq :lease_time #{inspect(lease_time)}")
+  defp check_lease_time(%{lease_time: lease_time} = dnsmasq),
+    do: %{dnsmasq | lease_time: lease_time!(lease_time)}
 
   defp check_lease_time(dnsmasq), do: dnsmasq
+
+  defp lease_time!(lease_time)
+       when lease_time == :infinite or (is_integer(lease_time) and lease_time in 120..0xFFFFFFFE),
+       do: lease_time
+
+  defp lease_time!(lease_time),
+    do: raise(ArgumentError, "Invalid dnsmasq :lease_time #{inspect(lease_time)}")
 
   defp check_path(dnsmasq, key) do
     case dnsmasq do
@@ -190,11 +194,13 @@ defmodule Dnsmasqex.Config do
   defp normalize_leases(leases, ipv4) when is_list(leases) do
     leases = Enum.map(leases, &normalize_lease(&1, ipv4))
 
-    if length(Enum.uniq_by(leases, &elem(&1, 0))) != length(leases) do
+    if length(Enum.uniq_by(leases, &lease_mac/1)) != length(leases) do
       raise ArgumentError, "Duplicate MAC address in dnsmasq :static_leases"
     end
 
-    if length(Enum.uniq_by(leases, &elem(&1, 1))) != length(leases) do
+    ips = leases |> Enum.map(&lease_ip/1) |> Enum.reject(&is_nil/1)
+
+    if length(Enum.uniq(ips)) != length(ips) do
       raise ArgumentError, "Duplicate IP address in dnsmasq :static_leases"
     end
 
@@ -209,8 +215,34 @@ defmodule Dnsmasqex.Config do
   defp normalize_lease({mac, ip, hostname}, ipv4),
     do: {check_mac(mac), lease_ip!(ip, ipv4), check_hostname(hostname)}
 
+  defp normalize_lease(%{mac: mac, ignore: true} = lease, _ipv4) when map_size(lease) == 2,
+    do: %{mac: check_mac(mac), ignore: true}
+
+  defp normalize_lease(%{mac: mac} = lease, ipv4) do
+    host =
+      lease
+      |> Map.take([:ip, :hostname, :lease_time])
+      |> Map.new(fn
+        {:ip, ip} -> {:ip, lease_ip!(ip, ipv4)}
+        {:hostname, hostname} -> {:hostname, check_hostname(hostname)}
+        {:lease_time, lease_time} -> {:lease_time, lease_time!(lease_time)}
+      end)
+
+    if host == %{} or map_size(host) + 1 != map_size(lease) do
+      raise ArgumentError, "Invalid dnsmasq static lease #{inspect(lease)}"
+    end
+
+    Map.put(host, :mac, check_mac(mac))
+  end
+
   defp normalize_lease(lease, _ipv4),
     do: raise(ArgumentError, "Invalid dnsmasq static lease #{inspect(lease)}")
+
+  defp lease_mac(%{mac: mac}), do: mac
+  defp lease_mac(lease), do: elem(lease, 0)
+
+  defp lease_ip(%{} = lease), do: lease[:ip]
+  defp lease_ip(lease), do: elem(lease, 1)
 
   defp lease_ip!(ip, ipv4) do
     {a, b, c, d} = ip = subnet_ip!(ip, ipv4)
@@ -606,6 +638,16 @@ defmodule Dnsmasqex.Config do
 
   defp host_line({mac, ip}), do: "#{mac},#{IP.ip_to_string(ip)},infinite\n"
   defp host_line({mac, ip, hostname}), do: "#{mac},#{IP.ip_to_string(ip)},#{hostname},infinite\n"
+  defp host_line(%{mac: mac, ignore: true}), do: "#{mac},ignore\n"
+
+  defp host_line(%{mac: mac} = lease) do
+    lease_time = Map.get(lease, :lease_time, if(lease[:ip], do: :infinite))
+
+    fields =
+      Enum.reject([mac, lease[:ip] && IP.ip_to_string(lease.ip), lease[:hostname]], &is_nil/1)
+
+    Enum.join(fields ++ lease_time(lease_time), ",") <> "\n"
+  end
 
   defp option_line({option, _value}) when option in [:serverid, :subnet], do: ""
   defp option_line({number, ""}) when is_integer(number), do: "#{number}\n"

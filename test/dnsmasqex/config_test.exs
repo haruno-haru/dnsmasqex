@@ -62,6 +62,63 @@ defmodule Dnsmasqex.ConfigTest do
     end
   end
 
+  test "writes map static leases with their own lease times, names and ignored clients" do
+    leases = [
+      {"aa:bb:cc:dd:ee:00", "192.168.24.100"},
+      %{mac: "AA:BB:CC:DD:EE:01", ip: "192.168.24.101", lease_time: 600},
+      %{mac: "aa:bb:cc:dd:ee:02", hostname: "camera"},
+      %{mac: "aa:bb:cc:dd:ee:03", ip: "192.168.24.103", hostname: "printer"},
+      %{mac: "aa:bb:cc:dd:ee:04", lease_time: :infinite},
+      %{mac: "aa:bb:cc:dd:ee:05", ignore: true}
+    ]
+
+    %{dnsmasq: dnsmasq} = Config.normalize(%{@config | dnsmasq: %{static_leases: leases}})
+
+    assert Enum.at(dnsmasq.static_leases, 1) == %{
+             mac: "aa:bb:cc:dd:ee:01",
+             ip: {192, 168, 24, 101},
+             lease_time: 600
+           }
+
+    assert {_path,
+            """
+            aa:bb:cc:dd:ee:00,192.168.24.100,infinite
+            aa:bb:cc:dd:ee:01,192.168.24.101,600
+            aa:bb:cc:dd:ee:02,camera
+            aa:bb:cc:dd:ee:03,192.168.24.103,printer,infinite
+            aa:bb:cc:dd:ee:04,infinite
+            aa:bb:cc:dd:ee:05,ignore
+            """} = Config.runtime_file(:static_leases, dnsmasq, "/tmp", "eth1")
+  end
+
+  test "rejects map static leases dnsmasq would misread" do
+    for lease <- [
+          %{mac: "aa:bb:cc:dd:ee:ff"},
+          %{ip: "192.168.24.10"},
+          %{mac: "aa:bb:cc:dd:ee:ff", ignore: true, ip: "192.168.24.10"},
+          %{mac: "aa:bb:cc:dd:ee:ff", ignore: false},
+          %{mac: "aa:bb:cc:dd:ee:ff", lease_time: 60},
+          %{mac: "aa:bb:cc:dd:ee:ff", hostname: "ignore"},
+          %{mac: "aa:bb:cc:dd:ee:ff", ip: "192.168.24.10", tag: "known"}
+        ] do
+      assert_raise ArgumentError, fn ->
+        Config.normalize(%{@config | dnsmasq: %{static_leases: [lease]}})
+      end
+    end
+
+    assert_raise ArgumentError, ~r/Duplicate IP/, fn ->
+      Config.normalize(%{
+        @config
+        | dnsmasq: %{
+            static_leases: [
+              {"aa:bb:cc:dd:ee:00", "192.168.24.10"},
+              %{mac: "aa:bb:cc:dd:ee:01", ip: "192.168.24.10"}
+            ]
+          }
+      })
+    end
+  end
+
   test "rejects static leases for the server, network, and broadcast addresses" do
     for ip <- ["192.168.24.0", "192.168.24.1", "192.168.24.255"] do
       assert_raise ArgumentError, fn ->

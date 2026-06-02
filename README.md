@@ -47,7 +47,9 @@ The following fields are supported:
   them, only static leases get addresses, or only DNS runs if there are none
 * `:lease_time` - seconds, from 120 to 4_294_967_294, or `:infinite`
 * `:static_leases` - `{mac, ip}` or `{mac, ip, hostname}` tuples with infinite
-  leases
+  leases, or maps with a `:mac` and any of `:ip`, `:hostname` and `:lease_time`.
+  A map lease with an `:ip` is infinite unless it has a `:lease_time`, and
+  `%{mac: mac, ignore: true}` never answers that client
 * `:records` - `{name, ip}` pairs for exactly those names, like `:dnsd`
 * `:domain_records` - `{domain, ip}` pairs that also answer every subdomain. The
   domain may use dnsmasq's patterns, such as `"*.example.com"` for only the

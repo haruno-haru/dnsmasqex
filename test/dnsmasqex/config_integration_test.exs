@@ -50,6 +50,16 @@ defmodule Dnsmasqex.ConfigIntegrationTest do
            txt_records: [{"pi.lan", ["v=1", ~s(say "hi" \\ bye)]}],
            mx_records: [{"lan", "pi.lan"}, {"example.com", "pi.lan", 10}]
          }},
+        {"map static leases",
+         %{
+           start: "192.168.24.10",
+           end: "192.168.24.99",
+           static_leases: [
+             %{mac: "aa:bb:cc:dd:ee:01", ip: "192.168.24.101", lease_time: 600},
+             %{mac: "aa:bb:cc:dd:ee:02", hostname: "camera"},
+             %{mac: "aa:bb:cc:dd:ee:05", ignore: true}
+           ]
+         }},
         {"static DHCP",
          %{static_leases: [{"aa:bb:cc:dd:ee:ff", "192.168.24.100", "printer"}], lease_time: 3600}}
       ] do
@@ -99,20 +109,19 @@ defmodule Dnsmasqex.ConfigIntegrationTest do
 
     for {path, contents} <- raw_config.files, do: File.write!(path, contents)
 
-    # dnsmasq --test doesn't read the options file, so check its lines as dhcp-option
-    {_path, options} = Config.runtime_file(:options, config.dnsmasq, tmp_dir, "eth1")
-    options_conf = Path.join(tmp_dir, "options.conf")
+    # dnsmasq --test doesn't read these files, so check their lines as the options they hold
+    runtime_conf = Path.join(tmp_dir, "runtime.conf")
 
-    File.write!(
-      options_conf,
-      for(
-        line <- String.split(options, "\n", trim: true),
-        into: "",
-        do: "dhcp-option=#{line}\n"
-      )
-    )
+    runtime_directives =
+      for {option, directive} <- [static_leases: "dhcp-host", options: "dhcp-option"],
+          {_path, contents} = Config.runtime_file(option, config.dnsmasq, tmp_dir, "eth1"),
+          line <- String.split(contents, "\n", trim: true),
+          into: "",
+          do: "#{directive}=#{line}\n"
 
-    for conf <- [Config.conf_path(tmp_dir, "eth1"), options_conf] do
+    File.write!(runtime_conf, runtime_directives)
+
+    for conf <- [Config.conf_path(tmp_dir, "eth1"), runtime_conf] do
       {output, status} = System.cmd("dnsmasq", ["--test", "-C", conf], stderr_to_stdout: true)
       assert status == 0, output
     end
