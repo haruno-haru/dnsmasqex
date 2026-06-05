@@ -230,6 +230,38 @@ defmodule DnsmasqexTest do
     end
   end
 
+  test "adds resolved addresses to nftables sets" do
+    contents =
+      dnsmasq_conf(%{
+        @config
+        | dnsmasq: %{
+            nftsets: [
+              {["example.com", "*.example.org"],
+               ["inet#filter#allowed", "6#ip6#filter#allowed6"]},
+              {"example.net", "filter#allowed"}
+            ]
+          }
+      })
+
+    assert contents =~ """
+           nftset=/example.com/*.example.org/inet#filter#allowed,6#ip6#filter#allowed6
+           nftset=/example.net/filter#allowed
+           """
+
+    for nftset <- [
+          {[], ["inet#filter#allowed"]},
+          {["example.com"], []},
+          {["example.com"], ["allowed"]},
+          {["example.com"], ["inet#filter#allowed,other"]},
+          {["bad domain"], ["filter#allowed"]},
+          "example.com"
+        ] do
+      assert_raise ArgumentError, fn ->
+        Dnsmasqex.normalize(%{@config | dnsmasq: %{nftsets: [nftset]}})
+      end
+    end
+  end
+
   test "supports infinite leases" do
     contents = dnsmasq_conf(put_in(@config, [:dnsmasq, :lease_time], :infinite))
     assert contents =~ "dhcp-range=192.168.24.10,192.168.24.99,infinite\n"
@@ -481,6 +513,100 @@ defmodule DnsmasqexTest do
       on_exit(fn -> System.cmd("kill", [to_string(os_pid)], stderr_to_stdout: true) end)
       assert_receive {^port, {:data, "ready\n"}}, 3000
       port
+    end
+  end
+
+  describe "capabilities" do
+    @moduletag :tmp_dir
+
+    @version """
+    Dnsmasq version 2.91  Copyright (c) 2000-2025 Simon Kelley
+    Compile time options: IPv6 GNU-getopt no-DBus no-UBus no-i18n no-IDN DHCP DHCPv6 no-Lua TFTP no-conntrack ipset no-nftset auth no-DNSSEC loop-detect inotify dumpfile
+
+    This software comes with ABSOLUTELY NO WARRANTY.
+    """
+
+    defp fake_dnsmasq(tmp_dir, output, status \\ 0) do
+      path = Path.join(tmp_dir, "dnsmasq")
+      File.write!(path, "#!/bin/sh\ncat <<'EOF'\n#{output}EOF\nexit #{status}\n")
+      File.chmod!(path, 0o755)
+      Application.put_env(:dnsmasqex, :dnsmasq, path)
+      on_exit(fn -> Application.delete_env(:dnsmasqex, :dnsmasq) end)
+    end
+
+    test "reports the version and features dnsmasq was built with", %{tmp_dir: tmp_dir} do
+      fake_dnsmasq(tmp_dir, @version)
+
+      assert Dnsmasqex.capabilities() ==
+               {:ok,
+                %{
+                  version: "2.91",
+                  ipv6: true,
+                  dhcp: true,
+                  dhcpv6: true,
+                  scripts: true,
+                  lua: false,
+                  tftp: true,
+                  auth: true,
+                  dnssec: false,
+                  ipset: true,
+                  nftset: false,
+                  conntrack: false,
+                  dbus: false,
+                  ubus: false,
+                  i18n: false,
+                  idn: false,
+                  loop_detect: true,
+                  inotify: true,
+                  dumpfile: true
+                }}
+
+      assert Dnsmasqex.check_system([]) == :ok
+    end
+
+    test "rejects a dnsmasq that can't serve DHCP or run the event script", %{tmp_dir: tmp_dir} do
+      for options <- ["IPv6 no-DHCP no-scripts", "IPv6 DHCP no-DHCPv6 no-scripts", "IPv6 no-DHCP"] do
+        fake_dnsmasq(tmp_dir, "Dnsmasq version 2.91\nCompile time options: #{options}\n")
+
+        assert Dnsmasqex.check_system([]) ==
+                 {:error, "#{tmp_dir}/dnsmasq was built without DHCP or script support"}
+      end
+    end
+
+    test "reports dnsmasq failures", %{tmp_dir: tmp_dir} do
+      fake_dnsmasq(tmp_dir, "broken\n", 1)
+      assert Dnsmasqex.capabilities() == {:error, "broken"}
+
+      fake_dnsmasq(tmp_dir, "something else\n")
+
+      assert {:error, "Unexpected dnsmasq --version output" <> _} =
+               Dnsmasqex.capabilities()
+    end
+
+    test "finds nf_tables loaded, built in, or as a module", %{tmp_dir: tmp_dir} do
+      modules = Path.join(tmp_dir, "lib/modules/6.18.33-v8")
+      File.mkdir_p!(modules)
+      File.mkdir_p!(Path.join(tmp_dir, "proc/sys/kernel"))
+      File.write!(Path.join(tmp_dir, "proc/sys/kernel/osrelease"), "6.18.33-v8\n")
+      File.write!(Path.join(modules, "modules.dep"), "kernel/net/netfilter/nf_tables_set.ko:\n")
+      refute Dnsmasqex.nftables_available?(tmp_dir)
+
+      File.write!(Path.join(modules, "modules.builtin"), "kernel/net/netfilter/nf_tables.ko\n")
+      assert Dnsmasqex.nftables_available?(tmp_dir)
+
+      File.rm!(Path.join(modules, "modules.builtin"))
+
+      File.write!(
+        Path.join(modules, "modules.dep"),
+        "kernel/net/netfilter/nf_tables.ko.xz: x.ko\n"
+      )
+
+      assert Dnsmasqex.nftables_available?(tmp_dir)
+
+      File.rm_rf!(Path.join(tmp_dir, "lib"))
+      refute Dnsmasqex.nftables_available?(tmp_dir)
+      File.mkdir_p!(Path.join(tmp_dir, "sys/module/nf_tables"))
+      assert Dnsmasqex.nftables_available?(tmp_dir)
     end
   end
 

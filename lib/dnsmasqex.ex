@@ -59,14 +59,118 @@ defmodule Dnsmasqex do
 
   @impl VintageNet.Technology
   def check_system(_opts) do
-    dnsmasq = Config.dnsmasq_path()
-
-    if System.find_executable(dnsmasq) do
-      :ok
-    else
-      {:error, "Can't find #{dnsmasq}"}
+    case capabilities() do
+      {:ok, %{dhcp: true, scripts: true}} -> :ok
+      {:ok, _} -> {:error, "#{Config.dnsmasq_path()} was built without DHCP or script support"}
+      error -> error
     end
   end
+
+  @typedoc """
+  The dnsmasq version and whether it was built with each feature
+  """
+  @type capabilities :: %{
+          version: String.t(),
+          ipv6: boolean(),
+          dhcp: boolean(),
+          dhcpv6: boolean(),
+          scripts: boolean(),
+          lua: boolean(),
+          tftp: boolean(),
+          auth: boolean(),
+          dnssec: boolean(),
+          ipset: boolean(),
+          nftset: boolean(),
+          conntrack: boolean(),
+          dbus: boolean(),
+          ubus: boolean(),
+          i18n: boolean(),
+          idn: boolean(),
+          loop_detect: boolean(),
+          inotify: boolean(),
+          dumpfile: boolean()
+        }
+
+  @features [
+    ipv6: ["IPv6"],
+    dhcp: ["DHCP"],
+    dhcpv6: ["DHCPv6"],
+    lua: ["Lua"],
+    tftp: ["TFTP"],
+    auth: ["auth"],
+    dnssec: ["DNSSEC"],
+    ipset: ["ipset"],
+    nftset: ["nftset"],
+    conntrack: ["conntrack"],
+    dbus: ["DBus"],
+    ubus: ["UBus"],
+    i18n: ["i18n"],
+    idn: ["IDN", "IDN2"],
+    loop_detect: ["loop-detect"],
+    inotify: ["inotify"],
+    dumpfile: ["dumpfile"]
+  ]
+
+  @doc """
+  Report the dnsmasq version and the features it was built with
+
+  For example, `:nftset` must be `true` to use the `:nftsets` option, and
+  `:dnssec` to validate DNSSEC.
+  """
+  @spec capabilities() :: {:ok, capabilities()} | {:error, String.t()}
+  def capabilities() do
+    dnsmasq = Config.dnsmasq_path()
+
+    case System.find_executable(dnsmasq) do
+      nil -> {:error, "Can't find #{dnsmasq}"}
+      path -> path |> System.cmd(["--version"], stderr_to_stdout: true) |> parse_version()
+    end
+  end
+
+  defp parse_version({output, 0}) do
+    with [_, version] <- Regex.run(~r/^Dnsmasq version (\S+)/m, output),
+         [_, options] <- Regex.run(~r/^Compile time options: (.*)$/m, output) do
+      options = String.split(options)
+
+      features =
+        Map.new(@features, fn {feature, names} ->
+          {feature, Enum.any?(names, &(&1 in options))}
+        end)
+
+      {:ok, Map.merge(features, %{version: version, scripts: "no-scripts" not in options})}
+    else
+      _ -> {:error, "Unexpected dnsmasq --version output: #{inspect(output)}"}
+    end
+  end
+
+  defp parse_version({output, _status}), do: {:error, String.trim(output)}
+
+  @doc """
+  Check whether the kernel has nf_tables, either built in or as a module
+
+  dnsmasq needs it, and a `:nftset` build, to use the `:nftsets` option.
+  """
+  @spec nftables_available?() :: boolean()
+  def nftables_available?(), do: nftables_available?("/")
+
+  @doc false
+  @spec nftables_available?(Path.t()) :: boolean()
+  def nftables_available?(root),
+    do: File.exists?(Path.join(root, "sys/module/nf_tables")) or nf_tables_module?(root)
+
+  defp nf_tables_module?(root) do
+    case File.read(Path.join(root, "proc/sys/kernel/osrelease")) do
+      {:ok, release} ->
+        modules = Path.join([root, "lib/modules", String.trim(release)])
+        Enum.any?(["modules.builtin", "modules.dep"], &listed?(File.read(Path.join(modules, &1))))
+
+      {:error, _} ->
+        false
+    end
+  end
+
+  defp listed?({:ok, modules}), do: modules =~ ~r{(^|/)nf_tables\.ko}m
+  defp listed?({:error, _}), do: false
 
   @runtime_options Config.runtime_options()
 

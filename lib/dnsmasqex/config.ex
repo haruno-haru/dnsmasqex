@@ -40,6 +40,11 @@ defmodule Dnsmasqex.Config do
   * `:domain` - the local domain. DHCP clients and records without a dot get
     names in it, clients get it as their domain, and its names are never
     forwarded
+  * `:nftsets` - `{domains, sets}` pairs that add the addresses dnsmasq
+    resolves for the domains to nftables sets, such as
+    `{["example.com"], ["inet#filter#allowed"]}`. A set may start with `4#` or
+    `6#` to take only that family. Needs `nftset` in
+    `Dnsmasqex.capabilities/0` and `Dnsmasqex.nftables_available?/0`
   * `:authoritative` - `true` when dnsmasq is the only DHCP server on the
     network, so clients with leases it doesn't know get addresses right away
   * `:lease_path` - an absolute path for the lease file, so leases survive a
@@ -82,6 +87,7 @@ defmodule Dnsmasqex.Config do
         :srv_records,
         :txt_records,
         :mx_records,
+        :nftsets,
         :options,
         :name_servers,
         :forward_domains,
@@ -102,6 +108,7 @@ defmodule Dnsmasqex.Config do
       |> update_list(:srv_records, &normalize_srv/1)
       |> update_list(:txt_records, &normalize_txt/1)
       |> update_list(:mx_records, &normalize_mx/1)
+      |> update_list(:nftsets, &normalize_nftset/1)
       |> Map.update(:options, %{}, &normalize_options(&1, ipv4))
       |> normalize_name_servers()
       |> update_list(:forward_domains, &normalize_forward_domain/1)
@@ -340,6 +347,22 @@ defmodule Dnsmasqex.Config do
 
   defp normalize_mx(mx), do: raise(ArgumentError, "Invalid dnsmasq MX record #{inspect(mx)}")
 
+  defp normalize_nftset({domains, sets}) when domains not in [nil, []] and sets not in [nil, []],
+    do: {Enum.map(List.wrap(domains), &domain_pattern!/1), Enum.map(List.wrap(sets), &nftset!/1)}
+
+  defp normalize_nftset(nftset),
+    do: raise(ArgumentError, "Invalid dnsmasq nftset #{inspect(nftset)}")
+
+  defp nftset!(set) when is_binary(set) do
+    if set =~ ~r/\A([46]#)?([[:alnum:]_.-]+#)?[[:alnum:]_.-]+#[[:alnum:]_.-]+\z/ do
+      set
+    else
+      raise ArgumentError, "Invalid nftables set #{inspect(set)}"
+    end
+  end
+
+  defp nftset!(set), do: raise(ArgumentError, "Invalid nftables set #{inspect(set)}")
+
   @ip_list_options [:dns, :router, :ntp]
   @list_options [:search | @ip_list_options]
 
@@ -561,7 +584,10 @@ defmodule Dnsmasqex.Config do
       Enum.map(dnsmasq.txt_records, fn {name, texts} ->
         Enum.join(["txt-record=#{name}" | Enum.map(texts, &quote_text/1)], ",")
       end),
-      Enum.map(dnsmasq.mx_records, &("mx-host=" <> Enum.join(Tuple.to_list(&1), ",")))
+      Enum.map(dnsmasq.mx_records, &("mx-host=" <> Enum.join(Tuple.to_list(&1), ","))),
+      Enum.map(dnsmasq.nftsets, fn {domains, sets} ->
+        "nftset=/#{Enum.join(domains, "/")}/#{Enum.join(sets, ",")}"
+      end)
     ]
     |> List.flatten()
     |> Enum.map_join(&[&1, "\n"])

@@ -88,6 +88,21 @@ defmodule Dnsmasqex.ConfigIntegrationTest do
     check_config(%{hosts_dir: hosts_dir}, tmp_dir)
   end
 
+  test "dnsmasq accepts nftsets only when built with them", %{tmp_dir: tmp_dir} do
+    dnsmasq = %{nftsets: [{["example.com"], ["inet#filter#allowed"]}]}
+
+    case Dnsmasqex.capabilities() do
+      {:ok, %{nftset: true}} ->
+        check_config(dnsmasq, tmp_dir)
+
+      {:ok, %{nftset: false}} ->
+        assert %ExUnit.AssertionError{message: message} =
+                 catch_error(check_config(dnsmasq, tmp_dir))
+
+        assert message =~ "recompile with HAVE_NFTSET"
+    end
+  end
+
   defp check_config(dnsmasq, tmp_dir) do
     config =
       Config.normalize(%{

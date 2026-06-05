@@ -71,6 +71,10 @@ The following fields are supported:
   subdomains to their own servers. `[]` answers them only from local names
 * `:domain` - the local domain. DHCP clients and records without a dot get
   names in it, clients get it as their domain, and its names are never forwarded
+* `:nftsets` - `{domains, sets}` pairs that add the addresses dnsmasq resolves
+  for the domains to nftables sets, such as
+  `{["example.com"], ["inet#filter#allowed"]}`. A set may start with `4#` or `6#`
+  to take only that family
 * `:authoritative` - `true` when dnsmasq is the only DHCP server on the network,
   so clients with leases it doesn't know get addresses right away
 * `:lease_path` - an absolute path for the lease file, so leases survive a
@@ -110,6 +114,22 @@ VintageNet.ioctl("eth1", :reload)
 Values set this way last until VintageNet rewrites the interface's files, for
 example when its configuration changes, VintageNet restarts, or the device
 reboots. dnsmasq reports every lease again as an `"old"` event when it reloads.
+
+## Checking dnsmasq and the kernel
+
+dnsmasq builds differ. `Dnsmasqex.capabilities/0` reports the version
+and the features dnsmasq was built with, and
+`Dnsmasqex.nftables_available?/0` whether the kernel has nf_tables:
+
+```elixir
+iex> Dnsmasqex.capabilities()
+{:ok, %{version: "2.91", dhcp: true, nftset: false, dnssec: false, ...}}
+iex> Dnsmasqex.nftables_available?()
+false
+```
+
+`:nftsets` needs both, or dnsmasq won't start. `VintageNet.verify_system/0` checks that dnsmasq can
+serve DHCP and run the script that reports events.
 
 ## Properties
 
