@@ -120,8 +120,31 @@ defmodule DnsmasqexTest do
   end
 
   test "normalizing twice gives the same config" do
-    normalized = Dnsmasqex.normalize(@config)
-    assert Dnsmasqex.normalize(normalized) == normalized
+    dnsmasq =
+      Map.merge(@config.dnsmasq, %{
+        static_leases: [
+          {"AA:BB:CC:DD:EE:FF", "192.168.24.100"},
+          %{mac: "aa:bb:cc:dd:ee:01", ip: "192.168.24.101", lease_time: 600},
+          %{mac: "aa:bb:cc:dd:ee:02", ignore: true}
+        ],
+        options: %{netmask: "255.255.255.0", serverid: "192.168.24.1", dns: "192.168.24.1"},
+        name_servers: "1.1.1.1",
+        forward_domains: [{"*.corp.example.com", "10.0.0.53"}],
+        domain: "lan",
+        domain_records: [{"#", "192.168.24.1"}],
+        cnames: [{"www.lan", "pi.lan"}],
+        srv_records: [{"_http._tcp.lan", "pi.lan", 80}],
+        txt_records: [{"pi.lan", "v=1"}],
+        mx_records: [{"lan", "pi.lan", 10}],
+        nftsets: [{"example.com", "inet#filter#allowed"}],
+        authoritative: true,
+        lease_path: "/data/dnsmasq/eth1.leases"
+      })
+
+    for config <- [@config, %{@config | dnsmasq: dnsmasq}] do
+      normalized = Dnsmasqex.normalize(config)
+      assert Dnsmasqex.normalize(normalized) == normalized
+    end
   end
 
   test "serves only DNS without a range or static leases" do

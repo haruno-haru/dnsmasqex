@@ -188,13 +188,8 @@ defmodule Dnsmasqex.Config do
     end
   end
 
-  defp check_authoritative(%{authoritative: authoritative})
-       when not is_boolean(authoritative),
-       do:
-         raise(
-           ArgumentError,
-           "Expected a boolean for :authoritative, got: #{inspect(authoritative)}"
-         )
+  defp check_authoritative(%{authoritative: value}) when not is_boolean(value),
+    do: raise(ArgumentError, "Expected a boolean for :authoritative, got: #{inspect(value)}")
 
   defp check_authoritative(dnsmasq), do: dnsmasq
 
