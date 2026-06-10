@@ -25,6 +25,7 @@ defmodule Dnsmasqex do
   @behaviour VintageNet.Technology
 
   alias Dnsmasqex.Config
+  alias Dnsmasqex.Server
 
   @impl VintageNet.Technology
   def normalize(%{type: __MODULE__, technology: __MODULE__}),
@@ -172,64 +173,25 @@ defmodule Dnsmasqex do
   defp listed?({:ok, modules}), do: modules =~ ~r{(^|/)nf_tables\.ko}m
   defp listed?({:error, _}), do: false
 
-  @runtime_options Config.runtime_options()
+  @server_commands [
+    :static_leases,
+    :add_static_lease,
+    :put_static_lease,
+    :remove_static_lease,
+    :records,
+    :add_record,
+    :put_record,
+    :remove_record,
+    :options,
+    :put_option,
+    :delete_option
+  ]
 
-  defp run_ioctl(ifname, option, [value], %{dnsmasq: dnsmasq} = config)
-       when option in @runtime_options do
-    %{dnsmasq: new_dnsmasq} =
-      Config.normalize(%{config | dnsmasq: Map.put(dnsmasq, option, value)})
+  defp run_ioctl(ifname, :reload, _args, %{dnsmasq: _}), do: Server.reload(ifname)
 
-    if option == :static_leases and not Config.dhcp_enabled?(dnsmasq) do
-      {:error, :dhcp_disabled}
-    else
-      :global.trans(
-        {{__MODULE__, ifname}, self()},
-        fn -> update_runtime_file(ifname, option, new_dnsmasq) end,
-        [node()]
-      )
-    end
-  rescue
-    e in ArgumentError -> {:error, Exception.message(e)}
-  end
-
-  defp run_ioctl(ifname, :reload, _args, %{dnsmasq: _}) do
-    with {:ok, pid} <- running_dnsmasq(ifname), do: reload(pid)
-  end
+  defp run_ioctl(ifname, command, args, %{dnsmasq: _}) when command in @server_commands,
+    do: Server.update(ifname, command, args)
 
   defp run_ioctl(ifname, command, args, %{technology: technology}),
     do: technology.ioctl(ifname, command, args)
-
-  defp update_runtime_file(ifname, option, dnsmasq) do
-    {path, contents} = Config.runtime_file(option, dnsmasq, tmpdir(), ifname)
-    temporary_path = path <> ".new"
-
-    with {:ok, pid} <- running_dnsmasq(ifname),
-         :ok <- File.write(temporary_path, contents),
-         :ok <- File.rename(temporary_path, path) do
-      reload(pid)
-    end
-  end
-
-  defp running_dnsmasq(ifname) do
-    conf_path = Config.conf_path(tmpdir(), ifname)
-
-    with {:ok, contents} <- File.read(Config.pid_path(tmpdir(), ifname)),
-         {pid, ""} when pid > 0 <- Integer.parse(String.trim(contents)),
-         {:ok, cmdline} <- File.read("/proc/#{pid}/cmdline"),
-         true <-
-           ["-C", conf_path] in Enum.chunk_every(String.split(cmdline, "\0"), 2, 1, :discard) do
-      {:ok, pid}
-    else
-      _ -> {:error, :not_running}
-    end
-  end
-
-  defp reload(pid) do
-    case System.cmd("kill", ["-HUP", Integer.to_string(pid)], stderr_to_stdout: true) do
-      {_output, 0} -> :ok
-      {output, _status} -> {:error, String.trim(output)}
-    end
-  end
-
-  defp tmpdir(), do: Application.fetch_env!(:vintage_net, :tmpdir)
 end

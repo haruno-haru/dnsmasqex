@@ -38,12 +38,12 @@ defmodule Dnsmasqex.Notifications do
   end
 
   @doc """
-  Remove the published leases and event
+  Remove the published leases, event and runtime values
   """
   @spec clear(VintageNet.ifname()) :: :ok
   def clear(ifname) do
     Leases.clear(ifname)
-    PropertyTable.delete(VintageNet, event_property(ifname))
+    PropertyTable.delete_matches(VintageNet, ["interface", ifname, "dnsmasq"])
   end
 
   # dnsmasq reports neighbors on every interface, not only its own

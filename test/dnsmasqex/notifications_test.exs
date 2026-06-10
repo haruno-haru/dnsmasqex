@@ -57,7 +57,7 @@ defmodule Dnsmasqex.NotificationsTest do
     context: context
   } do
     raw_config = raw_config(tmp_dir)
-    [notifier, %{start: {_, _, [daemon_args]}}] = raw_config.child_specs
+    [_server, notifier, %{start: {_, _, [daemon_args]}}] = raw_config.child_specs
     start_supervised!(notifier)
     File.write!(context.lease_path, "")
     property = ["interface", @ifname, "dnsmasq", "event"]
@@ -98,7 +98,7 @@ defmodule Dnsmasqex.NotificationsTest do
     on_exit(fn -> Application.put_env(:vintage_net, :muontrap_options, previous) end)
     Application.put_env(:vintage_net, :muontrap_options, delay_to_sigkill: 250)
 
-    [_, %{start: {_, _, [daemon_args]}}] = raw_config(tmp_dir).child_specs
+    [_server, _notifier, %{start: {_, _, [daemon_args]}}] = raw_config(tmp_dir).child_specs
 
     assert daemon_args[:opts][:delay_to_sigkill] == 250
     assert daemon_args[:opts][:env]["BEAM_NOTIFY_OPTIONS"] =~ "-e"

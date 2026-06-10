@@ -8,6 +8,7 @@ defmodule DnsmasqexTest do
   alias VintageNet.Interface.RawConfig
   alias Dnsmasqex.Leases
   alias Dnsmasqex.Notifications
+  alias Dnsmasqex.Server
 
   defmodule WiredTechnology do
     @moduledoc false
@@ -335,187 +336,220 @@ defmodule DnsmasqexTest do
     end
   end
 
-  describe "static_leases ioctl" do
+  describe "runtime ioctls" do
+    @hosts """
+    aa:bb:cc:dd:ee:ff,192.168.24.100,infinite
+    aa:bb:cc:dd:ee:01,192.168.24.101,printer,infinite
+    """
+
     setup do
       tmpdir = Application.fetch_env!(:vintage_net, :tmpdir)
       File.mkdir_p!(tmpdir)
-      hosts_path = Path.join(tmpdir, "dnsmasq.ioctl0.hosts")
-      options_path = Path.join(tmpdir, "dnsmasq.ioctl0.options")
-      records_path = Path.join(tmpdir, "dnsmasq.ioctl0.records")
-      pid_path = Path.join(tmpdir, "dnsmasq.ioctl0.pid")
-      File.write!(hosts_path, "aa:bb:cc:dd:ee:ff,192.168.24.100,infinite\n")
 
-      config_property = ["interface", "ioctl0", "config"]
-      PropertyTable.put(VintageNet, config_property, Dnsmasqex.normalize(@config))
+      paths =
+        for name <- ~w(hosts options records pid), do: Path.join(tmpdir, "dnsmasq.ioctl0.#{name}")
 
       on_exit(fn ->
-        PropertyTable.delete(VintageNet, config_property)
-
-        Enum.each(
-          [hosts_path, options_path, records_path, pid_path] ++
-            Enum.map([hosts_path, options_path, records_path], &(&1 <> ".new")),
-          &File.rm_rf!/1
-        )
+        PropertyTable.delete_matches(VintageNet, ["interface", "ioctl0"])
+        Enum.each(paths ++ Enum.map(paths, &(&1 <> ".new")), &File.rm_rf!/1)
       end)
 
+      [hosts_path, options_path, records_path, _pid_path] = paths
+
       %{
+        server: start_server(@config),
         hosts_path: hosts_path,
         options_path: options_path,
         records_path: records_path,
-        pid_path: pid_path,
         conf_path: Path.join(tmpdir, "dnsmasq.conf.ioctl0")
       }
     end
 
-    test "keeps the current leases when a lease is invalid", %{hosts_path: hosts_path} do
-      assert {:error, "Invalid MAC address \"not-a-mac\""} =
-               Dnsmasqex.ioctl("ioctl0", :static_leases, [
-                 [{"not-a-mac", "192.168.24.100"}]
-               ])
-
-      assert File.read!(hosts_path) == "aa:bb:cc:dd:ee:ff,192.168.24.100,infinite\n"
-    end
-
-    test "writes nothing when dnsmasq isn't running", %{hosts_path: hosts_path} do
-      assert {:error, :not_running} =
-               Dnsmasqex.ioctl("ioctl0", :static_leases, [
-                 [{"aa:bb:cc:dd:ee:01", "192.168.24.101"}]
-               ])
-
-      assert File.read!(hosts_path) == "aa:bb:cc:dd:ee:ff,192.168.24.100,infinite\n"
-    end
-
-    test "rejects malformed lease collections without changing the file", %{hosts_path: path} do
-      assert {:error, "Expected a list for :static_leases, got: nil"} =
-               Dnsmasqex.ioctl("ioctl0", :static_leases, [nil])
-
-      assert File.read!(path) == "aa:bb:cc:dd:ee:ff,192.168.24.100,infinite\n"
-    end
-
-    test "rejects enabling DHCP through a reload", %{hosts_path: path} do
-      config = Dnsmasqex.normalize(%{@config | dnsmasq: %{}})
+    defp start_server(config) do
+      config = Dnsmasqex.normalize(config)
       PropertyTable.put(VintageNet, ["interface", "ioctl0", "config"], config)
-
-      assert {:error, :dhcp_disabled} =
-               Dnsmasqex.ioctl("ioctl0", :static_leases, [
-                 [{"aa:bb:cc:dd:ee:ff", "192.168.24.100"}]
-               ])
-
-      assert File.read!(path) == "aa:bb:cc:dd:ee:ff,192.168.24.100,infinite\n"
+      tmpdir = Application.fetch_env!(:vintage_net, :tmpdir)
+      start_supervised!({Server, ifname: "ioctl0", tmpdir: tmpdir, config: config})
     end
 
-    @tag :linux
-    test "rewrites the leases and signals dnsmasq to reload", context do
-      port =
-        start_process(
-          "trap 'echo reloaded' HUP",
-          context.conf_path
-        )
+    defp ioctl(command, args), do: Dnsmasqex.ioctl("ioctl0", command, args)
+    defp runtime(option), do: VintageNet.get(["interface", "ioctl0", "dnsmasq", option])
 
-      assert :ok =
-               Dnsmasqex.ioctl("ioctl0", :static_leases, [
-                 [{"aa:bb:cc:dd:ee:01", "192.168.24.101", "printer"}]
-               ])
+    test "publishes and writes the configured values", context do
+      assert File.read!(context.hosts_path) == @hosts
+      assert File.read!(context.records_path) == "192.168.24.1 device.example.com\n"
+
+      assert runtime("static_leases") ==
+               Dnsmasqex.normalize(@config).dnsmasq.static_leases
+
+      assert runtime("records") == [{"device.example.com", {192, 168, 24, 1}}]
+      assert %{router: [], mtu: 1400} = runtime("options")
+    end
+
+    test "keeps the current values when a change is invalid", context do
+      assert {:error, "Invalid MAC address \"not-a-mac\""} =
+               ioctl(:static_leases, [[{"not-a-mac", "192.168.24.100"}]])
+
+      assert {:error, "Expected a list for :static_leases, got: nil"} =
+               ioctl(:static_leases, [nil])
+
+      assert {:error, "Invalid dnsmasq option {:mtu, 1}"} = ioctl(:options, [%{mtu: 1}])
+      assert {:error, "Invalid dnsmasq ioctl :add_static_lease []"} = ioctl(:add_static_lease, [])
+
+      assert File.read!(context.hosts_path) == @hosts
+      assert %{mtu: 1400} = runtime("options")
+    end
+
+    test "applies changes while dnsmasq isn't running", context do
+      assert :ok = ioctl(:static_leases, [[{"aa:bb:cc:dd:ee:02", "192.168.24.102"}]])
+      assert File.read!(context.hosts_path) == "aa:bb:cc:dd:ee:02,192.168.24.102,infinite\n"
+      assert runtime("static_leases") == [{"aa:bb:cc:dd:ee:02", {192, 168, 24, 102}}]
+    end
+
+    test "adds static leases one at a time and refuses to take a MAC or address", context do
+      assert :ok = ioctl(:add_static_lease, [{"aa:bb:cc:dd:ee:02", "192.168.24.102", "esp32"}])
+      assert :ok = ioctl(:add_static_lease, [%{mac: "aa:bb:cc:dd:ee:03", hostname: "camera"}])
+
+      assert File.read!(context.hosts_path) ==
+               @hosts <>
+                 "aa:bb:cc:dd:ee:02,192.168.24.102,esp32,infinite\naa:bb:cc:dd:ee:03,camera\n"
+
+      assert ioctl(:add_static_lease, [{"AA:BB:CC:DD:EE:FF", "192.168.24.110"}]) ==
+               {:error, {:mac_in_use, {"aa:bb:cc:dd:ee:ff", {192, 168, 24, 100}}}}
+
+      assert ioctl(:add_static_lease, [{"aa:bb:cc:dd:ee:04", "192.168.24.101"}]) ==
+               {:error, {:ip_in_use, {"aa:bb:cc:dd:ee:01", {192, 168, 24, 101}, "printer"}}}
+    end
+
+    test "puts a static lease in place of the one with the same MAC", context do
+      assert :ok = ioctl(:put_static_lease, [{"aa:bb:cc:dd:ee:ff", "192.168.24.110", "esp32"}])
+      assert :ok = ioctl(:put_static_lease, [%{mac: "aa:bb:cc:dd:ee:05", ignore: true}])
+
+      assert File.read!(context.hosts_path) == """
+             aa:bb:cc:dd:ee:01,192.168.24.101,printer,infinite
+             aa:bb:cc:dd:ee:ff,192.168.24.110,esp32,infinite
+             aa:bb:cc:dd:ee:05,ignore
+             """
+
+      assert ioctl(:put_static_lease, [{"aa:bb:cc:dd:ee:ff", "192.168.24.101"}]) ==
+               {:error, {:ip_in_use, {"aa:bb:cc:dd:ee:01", {192, 168, 24, 101}, "printer"}}}
+    end
+
+    test "removes static leases by MAC", context do
+      assert :ok = ioctl(:remove_static_lease, ["AA:BB:CC:DD:EE:FF"])
+      assert :ok = ioctl(:remove_static_lease, ["aa:bb:cc:dd:ee:99"])
 
       assert File.read!(context.hosts_path) ==
                "aa:bb:cc:dd:ee:01,192.168.24.101,printer,infinite\n"
-
-      assert_receive {^port, {:data, "reloaded\n"}}, 3000
-      refute File.exists?(context.hosts_path <> ".new")
     end
 
-    @tag :linux
-    test "rewrites the DHCP options and signals dnsmasq to reload", context do
-      port = start_process("trap 'echo reloaded' HUP", context.conf_path)
-
-      assert :ok = Dnsmasqex.ioctl("ioctl0", :options, [%{router: []}])
-      assert File.read!(context.options_path) == "option:router\n"
-      assert_receive {^port, {:data, "reloaded\n"}}, 3000
-    end
-
-    test "rejects invalid DHCP options without writing them", context do
-      assert {:error, "Invalid dnsmasq option {:mtu, 1}"} =
-               Dnsmasqex.ioctl("ioctl0", :options, [%{mtu: 1}])
-
-      refute File.exists?(context.options_path)
-    end
-
-    @tag :linux
-    test "rewrites the DNS records without DHCP", context do
-      PropertyTable.put(
-        VintageNet,
-        ["interface", "ioctl0", "config"],
-        Dnsmasqex.normalize(%{@config | dnsmasq: %{}})
+    test "applies concurrent changes one after another", context do
+      1..8
+      |> Task.async_stream(
+        &ioctl(:add_static_lease, [{"aa:bb:cc:dd:e0:0#{&1}", {192, 168, 24, 110 + &1}}])
       )
+      |> Enum.each(&assert(&1 == {:ok, :ok}))
 
+      assert length(String.split(File.read!(context.hosts_path), "\n", trim: true)) == 10
+    end
+
+    test "rejects lease changes without DHCP" do
+      stop_supervised!(Server)
+      start_server(%{@config | dnsmasq: %{}})
+
+      for {command, args} <- [
+            static_leases: [[{"aa:bb:cc:dd:ee:ff", "192.168.24.100"}]],
+            add_static_lease: [{"aa:bb:cc:dd:ee:ff", "192.168.24.100"}],
+            put_static_lease: [{"aa:bb:cc:dd:ee:ff", "192.168.24.100"}],
+            remove_static_lease: ["aa:bb:cc:dd:ee:ff"]
+          ] do
+        assert ioctl(command, args) == {:error, :dhcp_disabled}
+      end
+
+      assert :ok = ioctl(:add_record, [{"pi.lan", "192.168.24.1"}])
+    end
+
+    test "adds, puts and removes records by name", context do
+      assert :ok = ioctl(:add_record, [{"pi.lan", ["192.168.24.1", "fd00::1"]}])
+
+      assert ioctl(:add_record, [{"pi.lan", "192.168.24.2"}]) ==
+               {:error,
+                {:name_in_use,
+                 [{"pi.lan", {192, 168, 24, 1}}, {"pi.lan", {64_768, 0, 0, 0, 0, 0, 0, 1}}]}}
+
+      assert :ok = ioctl(:put_record, [{"device.example.com", "192.168.24.3"}])
+      assert :ok = ioctl(:remove_record, ["pi.lan"])
+      assert File.read!(context.records_path) == "192.168.24.3 device.example.com\n"
+      assert {:error, _} = ioctl(:put_record, [{"bad name", "192.168.24.3"}])
+    end
+
+    test "puts and deletes DHCP options", context do
+      assert :ok = ioctl(:put_option, [:ntp, "192.168.24.1"])
+      assert :ok = ioctl(:put_option, [:netmask, "255.255.255.0"])
+      assert %{ntp: [{192, 168, 24, 1}], subnet: {255, 255, 255, 0}} = runtime("options")
+
+      assert :ok = ioctl(:delete_option, [:netmask])
+      assert :ok = ioctl(:delete_option, [43])
+      refute Map.has_key?(runtime("options"), :subnet)
+      refute File.read!(context.options_path) =~ "43,"
+      assert File.read!(context.options_path) =~ "option:ntp-server,192.168.24.1\n"
+    end
+
+    test "returns file errors without changing the current values", context do
+      File.mkdir!(context.hosts_path <> ".new")
+      assert {:error, :eisdir} = ioctl(:static_leases, [[]])
+      assert File.read!(context.hosts_path) == @hosts
+      assert length(runtime("static_leases")) == 2
+    end
+
+    test "restores the configured values if it restarts", context do
+      assert :ok = ioctl(:remove_static_lease, ["aa:bb:cc:dd:ee:ff"])
+      VintageNet.subscribe(["interface", "ioctl0", "dnsmasq", "static_leases"])
+      ref = Process.monitor(context.server)
+      Process.exit(context.server, :kill)
+
+      assert_receive {:DOWN, ^ref, :process, _, :killed}
+      assert_receive {VintageNet, _, [_], [_, _], _}
+      assert File.read!(context.hosts_path) == @hosts
+    end
+
+    @tag :linux
+    test "signals dnsmasq to reload each kind of change", context do
       port = start_process("trap 'echo reloaded' HUP", context.conf_path)
 
-      assert :ok =
-               Dnsmasqex.ioctl("ioctl0", :records, [[{"pi.lan", "192.168.24.1"}]])
-
-      assert File.read!(context.records_path) == "192.168.24.1 pi.lan\n"
-      assert_receive {^port, {:data, "reloaded\n"}}, 3000
-    end
-
-    @tag :linux
-    test "concurrent lease updates publish complete files", context do
-      start_process("trap ':' HUP", context.conf_path)
-
-      results =
-        Task.async_stream(
-          1..8,
-          fn n ->
-            leases = [{"aa:bb:cc:dd:ee:ff", {192, 168, 24, 100 + n}, "printer#{n}"}]
-            Dnsmasqex.ioctl("ioctl0", :static_leases, [leases])
-          end,
-          max_concurrency: 8,
-          timeout: 10_000
-        )
-
-      assert Enum.all?(results, &(&1 == {:ok, :ok}))
-
-      assert File.read!(context.hosts_path) in Enum.map(
-               1..8,
-               &"aa:bb:cc:dd:ee:ff,192.168.24.#{100 + &1},printer#{&1},infinite\n"
-             )
+      for {command, args} <- [
+            static_leases: [[{"aa:bb:cc:dd:ee:01", "192.168.24.101", "printer"}]],
+            add_static_lease: [{"aa:bb:cc:dd:ee:02", "192.168.24.102"}],
+            options: [%{router: []}],
+            put_option: [:ntp, "192.168.24.1"],
+            records: [[{"pi.lan", "192.168.24.1"}]],
+            remove_record: ["pi.lan"]
+          ] do
+        assert :ok = ioctl(command, args)
+        assert_receive {^port, {:data, "reloaded\n"}}, 3000
+      end
 
       refute File.exists?(context.hosts_path <> ".new")
-    end
-
-    @tag :linux
-    test "returns file errors without replacing the current leases", context do
-      start_process(":", context.conf_path)
-      File.mkdir!(context.hosts_path <> ".new")
-
-      assert {:error, :eisdir} =
-               Dnsmasqex.ioctl("ioctl0", :static_leases, [[]])
-
-      assert File.read!(context.hosts_path) == "aa:bb:cc:dd:ee:ff,192.168.24.100,infinite\n"
     end
 
     @tag :linux
     test "doesn't match another interface's configuration path", context do
       start_process(":", context.conf_path <> "0")
-      assert {:error, :not_running} = Dnsmasqex.ioctl("ioctl0", :reload, [])
+      assert {:error, :not_running} = ioctl(:reload, [])
     end
 
     @tag :linux
     test "requires the configuration path to follow the configuration option", context do
       start_process(":", context.conf_path, "--unrelated")
-      assert {:error, :not_running} = Dnsmasqex.ioctl("ioctl0", :reload, [])
+      assert {:error, :not_running} = ioctl(:reload, [])
     end
 
     @tag :linux
     test "doesn't signal a process that reused a stale pid" do
-      port =
-        start_process(
-          "trap 'echo alive' USR1",
-          "unrelated"
-        )
-
+      port = start_process("trap 'echo alive' USR1", "unrelated")
       {:os_pid, os_pid} = Port.info(port, :os_pid)
 
-      assert {:error, :not_running} = Dnsmasqex.ioctl("ioctl0", :reload, [])
+      assert {:error, :not_running} = ioctl(:reload, [])
 
       System.cmd("kill", ["-USR1", to_string(os_pid)])
       assert_receive {^port, {:data, "alive\n"}}, 3000

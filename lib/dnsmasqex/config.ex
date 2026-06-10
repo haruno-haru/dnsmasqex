@@ -59,6 +59,7 @@ defmodule Dnsmasqex.Config do
   alias VintageNet.IP
   alias Dnsmasqex.Daemon
   alias Dnsmasqex.Notifications
+  alias Dnsmasqex.Server
 
   @runtime_options [:static_leases, :options, :records]
 
@@ -122,6 +123,13 @@ defmodule Dnsmasqex.Config do
 
   def normalize(%{dnsmasq: _not_static} = config), do: Map.drop(config, [:dnsmasq])
   def normalize(config), do: config
+
+  @doc false
+  @spec normalize_value(map(), runtime_option(), term()) :: term()
+  def normalize_value(%{dnsmasq: dnsmasq} = config, option, value) do
+    %{dnsmasq: normalized} = normalize(%{config | dnsmasq: Map.put(dnsmasq, option, value)})
+    Map.fetch!(normalized, option)
+  end
 
   defp check_no_busybox_servers(%{dhcpd: _}),
     do: raise(ArgumentError, "Use :dnsmasq instead of :dhcpd with Dnsmasqex")
@@ -240,11 +248,15 @@ defmodule Dnsmasqex.Config do
   defp normalize_lease(lease, _ipv4),
     do: raise(ArgumentError, "Invalid dnsmasq static lease #{inspect(lease)}")
 
-  defp lease_mac(%{mac: mac}), do: mac
-  defp lease_mac(lease), do: elem(lease, 0)
+  @doc false
+  @spec lease_mac(tuple() | map()) :: String.t()
+  def lease_mac(%{mac: mac}), do: mac
+  def lease_mac(lease), do: elem(lease, 0)
 
-  defp lease_ip(%{} = lease), do: lease[:ip]
-  defp lease_ip(lease), do: elem(lease, 1)
+  @doc false
+  @spec lease_ip(tuple() | map()) :: :inet.ip4_address() | nil
+  def lease_ip(%{} = lease), do: lease[:ip]
+  def lease_ip(lease), do: elem(lease, 1)
 
   defp lease_ip!(ip, ipv4) do
     {a, b, c, d} = ip = subnet_ip!(ip, ipv4)
@@ -512,6 +524,9 @@ defmodule Dnsmasqex.Config do
 
     notifier = Supervisor.child_spec({BEAMNotify, notifier_options}, id: :dnsmasq_notify)
 
+    server =
+      {Server, ifname: ifname, tmpdir: tmpdir, config: %{ipv4: ipv4, dnsmasq: dnsmasq}}
+
     daemon =
       Supervisor.child_spec(
         {Daemon,
@@ -540,7 +555,7 @@ defmodule Dnsmasqex.Config do
             | Enum.map(@runtime_options, &(runtime_path(&1, tmpdir, ifname) <> ".new"))
           ] ++ raw_config.cleanup_files,
         up_cmds: raw_config.up_cmds ++ lease_dir_cmds(dnsmasq),
-        child_specs: raw_config.child_specs ++ [notifier, daemon],
+        child_specs: raw_config.child_specs ++ [server, notifier, daemon],
         down_cmds: raw_config.down_cmds ++ [{:fun, Notifications, :clear, [ifname]}]
     }
   end
