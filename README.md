@@ -117,6 +117,83 @@ Don't combine `:dnsmasq` with `:dhcpd` or `:dnsd` on the same interface.
 Static leases must have unique MAC and IP addresses and cannot use the server's
 address or the subnet's network or broadcast address.
 
+WiFi access point example, in place of `:dhcpd`:
+
+```elixir
+iex> VintageNet.configure("wlan0", %{
+    type: Dnsmasqex,
+    technology: VintageNetWiFi,
+    vintage_net_wifi: %{networks: [%{mode: :ap, ssid: "test ssid", key_mgmt: :none}]},
+    ipv4: %{method: :static, address: "192.168.24.1", netmask: "255.255.255.0"},
+    dnsmasq: %{start: "192.168.24.2", end: "192.168.24.10"}
+  })
+```
+
+Fixed addresses and names for known clients example:
+
+```elixir
+dnsmasq: %{
+  start: "192.168.24.10",
+  end: "192.168.24.99",
+  domain: "lan",
+  authoritative: true,
+  lease_path: "/data/dnsmasq/eth1.leases",
+  static_leases: [
+    {"aa:bb:cc:dd:ee:01", "192.168.24.101", "esp32"},
+    %{mac: "aa:bb:cc:dd:ee:02", ip: "192.168.24.102", hostname: "camera", lease_time: 600},
+    %{mac: "aa:bb:cc:dd:ee:03", ignore: true}
+  ]
+}
+```
+
+Clients reach each other as `esp32.lan` and `camera.lan`.
+
+Isolated network example, with no gateway and no upstream DNS:
+
+```elixir
+dnsmasq: %{
+  start: "192.168.24.10",
+  end: "192.168.24.99",
+  domain: "lan",
+  options: %{router: []},
+  name_servers: [],
+  records: [{"device", "192.168.24.1"}]
+}
+```
+
+Captive portal example, answering every name with the device's address:
+
+```elixir
+dnsmasq: %{
+  start: "192.168.24.10",
+  end: "192.168.24.99",
+  domain_records: [{"#", "192.168.24.1"}]
+}
+```
+
+DNS records example:
+
+```elixir
+dnsmasq: %{
+  domain: "lan",
+  records: [{"device", "192.168.24.1"}, {"nas", "192.168.24.50"}],
+  cnames: [{"www.lan", "device.lan"}],
+  srv_records: [{"_http._tcp.lan", "device.lan", 80}],
+  txt_records: [{"device.lan", "model=rpi5"}],
+  domain_records: [{"*.apps.lan", "192.168.24.1"}]
+}
+```
+
+Forwarding example, sending one domain to its own servers and the rest to
+public ones:
+
+```elixir
+dnsmasq: %{
+  name_servers: ["1.1.1.1", "9.9.9.9"],
+  forward_domains: [{"corp.example.com", ["10.0.0.53"]}]
+}
+```
+
 ## Changing leases, options and records at runtime
 
 The static leases, DHCP options and `:records` can change without
@@ -220,6 +297,16 @@ reloads. An event looks like this:
   time_remaining: 600,
   requested_options: [1, 3, 28, 6]
 }
+```
+
+To act on them, subscribe to the property:
+
+```elixir
+iex> VintageNet.subscribe(["interface", "eth1", "dnsmasq", "event"])
+:ok
+iex> flush()
+{VintageNet, ["interface", "eth1", "dnsmasq", "event"], nil,
+ %Dnsmasqex.Event{name: "add", ...}, %{}}
 ```
 
 See `Dnsmasqex.Event` for all the fields. dnsmasq checks the neighbor
