@@ -396,7 +396,12 @@ defmodule DnsmasqexTest do
       assert {:error, "Invalid dnsmasq option {:mtu, 1}"} = ioctl(:options, [%{mtu: 1}])
       assert {:error, "Invalid dnsmasq ioctl :add_static_lease []"} = ioctl(:add_static_lease, [])
 
+      for command <- [:add_record, :put_record], ips <- [nil, []] do
+        assert {:error, _} = ioctl(command, [{"device.example.com", ips}])
+      end
+
       assert File.read!(context.hosts_path) == @hosts
+      assert File.read!(context.records_path) == "192.168.24.1 device.example.com\n"
       assert %{mtu: 1400} = runtime("options")
     end
 
@@ -472,14 +477,14 @@ defmodule DnsmasqexTest do
     test "adds, puts and removes records by name", context do
       assert :ok = ioctl(:add_record, [{"pi.lan", ["192.168.24.1", "fd00::1"]}])
 
-      assert ioctl(:add_record, [{"pi.lan", "192.168.24.2"}]) ==
+      assert ioctl(:add_record, [{"PI.LAN", "192.168.24.2"}]) ==
                {:error,
                 {:name_in_use,
                  [{"pi.lan", {192, 168, 24, 1}}, {"pi.lan", {64_768, 0, 0, 0, 0, 0, 0, 1}}]}}
 
-      assert :ok = ioctl(:put_record, [{"device.example.com", "192.168.24.3"}])
-      assert :ok = ioctl(:remove_record, ["pi.lan"])
-      assert File.read!(context.records_path) == "192.168.24.3 device.example.com\n"
+      assert :ok = ioctl(:put_record, [{"Device.Example.Com", "192.168.24.3"}])
+      assert :ok = ioctl(:remove_record, ["Pi.Lan"])
+      assert File.read!(context.records_path) == "192.168.24.3 Device.Example.Com\n"
       assert {:error, _} = ioctl(:put_record, [{"bad name", "192.168.24.3"}])
     end
 

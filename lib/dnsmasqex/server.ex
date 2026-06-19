@@ -109,17 +109,17 @@ defmodule Dnsmasqex.Server do
     {:ok, :static_leases, leases}
   end
 
-  defp change(:add_record, [{name, ips}], state) when ips != [] do
+  defp change(:add_record, [{name, ips}], state) when ips not in [nil, []] do
     new_records = normalize(state, :records, for(ip <- List.wrap(ips), do: {name, ip}))
     records = state.config.dnsmasq.records
 
-    case Enum.filter(records, &(elem(&1, 0) == name)) do
+    case Enum.filter(records, &same_name?(&1, name)) do
       [] -> {:ok, :records, records ++ new_records}
       existing -> {:error, {:name_in_use, existing}}
     end
   end
 
-  defp change(:put_record, [{name, ips}], state) when ips != [] do
+  defp change(:put_record, [{name, ips}], state) when ips not in [nil, []] do
     new_records = normalize(state, :records, for(ip <- List.wrap(ips), do: {name, ip}))
     {:ok, :records, remove_name(state.config.dnsmasq.records, name) ++ new_records}
   end
@@ -150,7 +150,9 @@ defmodule Dnsmasqex.Server do
     end
   end
 
-  defp remove_name(records, name), do: Enum.reject(records, &(elem(&1, 0) == name))
+  defp remove_name(records, name), do: Enum.reject(records, &same_name?(&1, name))
+
+  defp same_name?({existing, _ip}, name), do: String.downcase(existing) == String.downcase(name)
 
   defp option_aliases(:subnet), do: [:netmask]
   defp option_aliases(:netmask), do: [:subnet]

@@ -234,9 +234,10 @@ a dynamic lease on a new static address, dnsmasq refuses that client's renewal
 so it moves to another address, and the static client gets the address when it
 renews. Check the `dhcpd/leases` property first to see whether that will happen.
 
-The changes last until the interface is configured again, VintageNet restarts,
-or the device reboots. dnsmasq reads new files in `:hosts_dir` on its own, but
-needs `:reload` after one changes or is removed.
+The changes are held in memory. Reconfiguring the interface or restarting its
+runtime server restores the configured values, including when the interface's
+supervision tree restarts. dnsmasq reads new files in `:hosts_dir` on its own,
+but needs `:reload` after one changes or is removed.
 
 ## Checking dnsmasq and the kernel
 
