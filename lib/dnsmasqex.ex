@@ -123,8 +123,13 @@ defmodule Dnsmasqex do
     dnsmasq = Config.dnsmasq_path()
 
     case System.find_executable(dnsmasq) do
-      nil -> {:error, "Can't find #{dnsmasq}"}
-      path -> path |> System.cmd(["--version"], stderr_to_stdout: true) |> parse_version()
+      nil ->
+        {:error, "Can't find #{dnsmasq}"}
+
+      path ->
+        path
+        |> System.cmd(["--version"], stderr_to_stdout: true, env: [{"LC_ALL", "C"}])
+        |> parse_version()
     end
   end
 

@@ -635,6 +635,33 @@ defmodule DnsmasqexTest do
       end
     end
 
+    test "requests untranslated version output", %{tmp_dir: tmp_dir} do
+      locale = System.get_env("LC_ALL")
+      System.put_env("LC_ALL", "fr_FR.UTF-8")
+
+      on_exit(fn ->
+        if locale, do: System.put_env("LC_ALL", locale), else: System.delete_env("LC_ALL")
+      end)
+
+      path = Path.join(tmp_dir, "dnsmasq")
+
+      File.write!(path, """
+      #!/bin/sh
+      if [ "$LC_ALL" = C ]; then
+        echo 'Dnsmasq version 2.91'
+        echo 'Compile time options: DHCP'
+      else
+        echo 'Options de compilation: DHCP'
+      fi
+      """)
+
+      File.chmod!(path, 0o755)
+      Application.put_env(:dnsmasqex, :dnsmasq, path)
+      on_exit(fn -> Application.delete_env(:dnsmasqex, :dnsmasq) end)
+
+      assert {:ok, %{version: "2.91", dhcp: true}} = Dnsmasqex.capabilities()
+    end
+
     test "reports dnsmasq failures", %{tmp_dir: tmp_dir} do
       fake_dnsmasq(tmp_dir, "broken\n", 1)
       assert Dnsmasqex.capabilities() == {:error, "broken"}
