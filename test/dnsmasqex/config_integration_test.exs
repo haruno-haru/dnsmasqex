@@ -42,12 +42,17 @@ defmodule Dnsmasqex.ConfigIntegrationTest do
            domain: "lan",
            records: [{"pi", "192.168.24.1"}, {"pi6.lan", "fd00::1"}],
            domain_records: [{"*.example.com", "192.168.24.2"}, {"#", "192.168.24.1"}],
-           cnames: [{"www.lan", "pi.lan"}],
+           cnames: [{"www.lan", "ALIAS.LAN"}, {"alias.lan", "pi.lan"}],
            srv_records: [
              {"_http._tcp.lan", "pi.lan", 80},
-             {"_ipp._tcp.lan", "pi.lan", 631, 10, 5}
+             {"_ipp._tcp.lan", "pi.lan", 631, 10, 5},
+             {"_ftp._tcp.lan", ".", 0}
            ],
-           txt_records: [{"pi.lan", ["v=1", ~s(say "hi" \\ bye)]}],
+           txt_records: [
+             {"pi.lan", ["v=1", ~s(say "hi" \\ bye)]},
+             {"pi.lan",
+              List.duplicate(String.duplicate("a", 255), 3) ++ [String.duplicate("b", 230)]}
+           ],
            mx_records: [{"lan", "pi.lan"}, {"example.com", "pi.lan", 10}]
          }},
         {"map static leases",
@@ -89,7 +94,7 @@ defmodule Dnsmasqex.ConfigIntegrationTest do
   end
 
   test "dnsmasq accepts nftsets only when built with them", %{tmp_dir: tmp_dir} do
-    dnsmasq = %{nftsets: [{["example.com"], ["inet#filter#allowed"]}]}
+    dnsmasq = %{nftsets: [{["example.com", ".example.org.", "#"], ["inet#filter#allowed"]}]}
 
     case Dnsmasqex.capabilities() do
       {:ok, %{nftset: true}} ->

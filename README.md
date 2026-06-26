@@ -100,7 +100,8 @@ The following fields are supported:
 * `:cnames` - `{alias, target}` pairs. dnsmasq only answers them when it knows
   the target from records or DHCP
 * `:srv_records` - `{name, target, port}` or
-  `{name, target, port, priority, weight}` tuples
+  `{name, target, port, priority, weight}` tuples. A target of `"."` marks
+  the service as unavailable
 * `:txt_records` - `{name, text}` or `{name, [text]}` pairs
 * `:mx_records` - `{name, target}` or `{name, target, preference}` tuples
 * `:name_servers` - upstream DNS servers. Without it, dnsmasq follows the name
@@ -110,7 +111,8 @@ The following fields are supported:
 * `:nftsets` - `{domains, sets}` pairs that add the addresses dnsmasq resolves
   for the domains to nftables sets, such as
   `{["example.com"], ["inet#filter#allowed"]}`. A set may start with `4#` or `6#`
-  to take only that family. See [Checking dnsmasq and the
+  to take only that family. Domains include their subdomains; `"#"` matches
+  all domains. Wildcards aren't supported. See [Checking dnsmasq and the
   kernel](#checking-dnsmasq-and-the-kernel)
 
 Don't combine `:dnsmasq` with `:dhcpd` or `:dnsd` on the same interface.
@@ -252,8 +254,9 @@ iex> Dnsmasqex.nftables_available?()
 false
 ```
 
-`:nftsets` needs both, or dnsmasq won't start. `VintageNet.verify_system/0`
-checks that dnsmasq can serve DHCP and run the script that reports events.
+`:nftsets` needs both. Its nftables tables and sets must already exist.
+`VintageNet.verify_system/0` checks that dnsmasq can serve DHCP and run the
+script that reports events.
 
 ## Properties
 

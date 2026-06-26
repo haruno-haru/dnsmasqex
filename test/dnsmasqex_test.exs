@@ -212,10 +212,11 @@ defmodule DnsmasqexTest do
         @config
         | dnsmasq: %{
             domain_records: [{"example.com", "192.168.24.2"}, {"#", "192.168.24.1"}],
-            cnames: [{"www.lan", "pi.lan"}],
+            cnames: [{"www.lan", "PI.LAN"}, {"pi.lan", "device.lan"}],
             srv_records: [
               {"_http._tcp.lan", "pi.lan", 80},
-              {"_ipp._tcp.lan", "printer.lan", 631, 10, 5}
+              {"_ipp._tcp.lan", "printer.lan", 631, 10, 5},
+              {"_ftp._tcp.lan", ".", 0}
             ],
             txt_records: [{"pi.lan", ["v=1", ~s(say "hi" \\ bye)]}],
             mx_records: [{"lan", "mail.lan"}, {"example.com", "mail.lan", 10}]
@@ -225,13 +226,36 @@ defmodule DnsmasqexTest do
     assert contents =~ """
            address=/example.com/192.168.24.2
            address=/#/192.168.24.1
-           cname=www.lan,pi.lan
+           cname=www.lan,PI.LAN
+           cname=pi.lan,device.lan
            srv-host=_http._tcp.lan,pi.lan,80
            srv-host=_ipp._tcp.lan,printer.lan,631,10,5
+           srv-host=_ftp._tcp.lan,.,0
            txt-record=pi.lan,"v=1","say \\"hi\\" \\\\ bye"
            mx-host=lan,mail.lan
            mx-host=example.com,mail.lan,10
            """
+  end
+
+  test "limits encoded TXT records to dnsmasq's configuration line length" do
+    texts = List.duplicate(String.duplicate("a", 255), 3) ++ [String.duplicate("b", 230)]
+    dnsmasq = %{txt_records: [{"pi.lan", texts}]}
+
+    line =
+      dnsmasq_conf(%{@config | dnsmasq: dnsmasq})
+      |> String.split("\n")
+      |> Enum.find(&String.starts_with?(&1, "txt-record="))
+
+    assert byte_size(line) == 1024
+
+    for texts <- [
+          List.duplicate(String.duplicate("a", 255), 3) ++ [String.duplicate("b", 231)],
+          List.duplicate(String.duplicate("\"", 255), 2)
+        ] do
+      assert_raise ArgumentError, ~r/TXT record.*1024/, fn ->
+        Dnsmasqex.normalize(%{@config | dnsmasq: %{txt_records: [{"pi.lan", texts}]}})
+      end
+    end
   end
 
   test "keeps leases where configured and answers unknown leases when authoritative" do
@@ -260,16 +284,16 @@ defmodule DnsmasqexTest do
         @config
         | dnsmasq: %{
             nftsets: [
-              {["example.com", "*.example.org"],
+              {["example.com", ".example.org."],
                ["inet#filter#allowed", "6#ip6#filter#allowed6"]},
-              {"example.net", "filter#allowed"}
+              {"#", "filter#allowed"}
             ]
           }
       })
 
     assert contents =~ """
-           nftset=/example.com/*.example.org/inet#filter#allowed,6#ip6#filter#allowed6
-           nftset=/example.net/filter#allowed
+           nftset=/example.com/.example.org./inet#filter#allowed,6#ip6#filter#allowed6
+           nftset=/#/filter#allowed
            """
 
     for nftset <- [
@@ -278,6 +302,9 @@ defmodule DnsmasqexTest do
           {["example.com"], ["allowed"]},
           {["example.com"], ["inet#filter#allowed,other"]},
           {["bad domain"], ["filter#allowed"]},
+          {["*.example.com"], ["filter#allowed"]},
+          {["*example.com"], ["filter#allowed"]},
+          {["*"], ["filter#allowed"]},
           "example.com"
         ] do
       assert_raise ArgumentError, fn ->

@@ -20,7 +20,8 @@ defmodule Dnsmasqex.Config do
   * `:cnames` - `{alias, target}` pairs. dnsmasq only answers them when it
     knows the target from records or DHCP
   * `:srv_records` - `{name, target, port}` or
-    `{name, target, port, priority, weight}` tuples
+    `{name, target, port, priority, weight}` tuples. A target of `"."` marks
+    the service as unavailable
   * `:txt_records` - `{name, text}` or `{name, [text]}` pairs
   * `:mx_records` - `{name, target}` or `{name, target, preference}` tuples
   * `:options` - a map of DHCP options to send, like `VintageNet.IP.DhcpdConfig`:
@@ -43,7 +44,9 @@ defmodule Dnsmasqex.Config do
   * `:nftsets` - `{domains, sets}` pairs that add the addresses dnsmasq
     resolves for the domains to nftables sets, such as
     `{["example.com"], ["inet#filter#allowed"]}`. A set may start with `4#` or
-    `6#` to take only that family. Needs `nftset` in
+    `6#` to take only that family. Domains include their subdomains; `"#"`
+    matches all domains. Wildcards aren't supported. The tables and sets must
+    already exist. Needs `nftset` in
     `Dnsmasqex.capabilities/0` and `Dnsmasqex.nftables_available?/0`
   * `:authoritative` - `true` when dnsmasq is the only DHCP server on the
     network, so clients with leases it doesn't know get addresses right away
@@ -106,6 +109,7 @@ defmodule Dnsmasqex.Config do
       |> update_list(:records, &normalize_record/1)
       |> update_list(:domain_records, &normalize_domain_record/1)
       |> update_list(:cnames, &normalize_cname/1)
+      |> check_cnames()
       |> update_list(:srv_records, &normalize_srv/1)
       |> update_list(:txt_records, &normalize_txt/1)
       |> update_list(:mx_records, &normalize_mx/1)
@@ -322,17 +326,54 @@ defmodule Dnsmasqex.Config do
   defp normalize_cname({name, target}), do: {dns_name!(name), dns_name!(target)}
   defp normalize_cname(cname), do: raise(ArgumentError, "Invalid dnsmasq CNAME #{inspect(cname)}")
 
+  defp check_cnames(%{cnames: cnames} = dnsmasq) do
+    targets =
+      Map.new(cnames, fn {name, target} -> {String.downcase(name), String.downcase(target)} end)
+
+    if map_size(targets) != length(cnames) do
+      raise ArgumentError, "dnsmasq CNAME aliases must be unique"
+    end
+
+    Enum.each(Map.keys(targets), &check_cname_chain(&1, targets, %{}))
+    dnsmasq
+  end
+
+  defp check_cname_chain(name, targets, visited) do
+    case targets do
+      %{^name => target} ->
+        if Map.has_key?(visited, name) do
+          raise ArgumentError, "dnsmasq CNAME loop involving #{inspect(name)}"
+        end
+
+        check_cname_chain(target, targets, Map.put(visited, name, target))
+
+      _ ->
+        :ok
+    end
+  end
+
   defp normalize_srv({name, target, port}) when port in 0..65_535,
-    do: {dns_name!(name), dns_name!(target), port}
+    do: {dns_name!(name), srv_target!(target), port}
 
   defp normalize_srv({name, target, port, priority, weight})
        when port in 0..65_535 and priority in 0..65_535 and weight in 0..65_535,
-       do: {dns_name!(name), dns_name!(target), port, priority, weight}
+       do: {dns_name!(name), srv_target!(target), port, priority, weight}
 
   defp normalize_srv(srv), do: raise(ArgumentError, "Invalid dnsmasq SRV record #{inspect(srv)}")
 
-  defp normalize_txt({name, texts}) when is_list(texts),
-    do: {dns_name!(name), Enum.map(texts, &text!/1)}
+  defp srv_target!("."), do: "."
+  defp srv_target!(target), do: dns_name!(target)
+
+  defp normalize_txt({name, texts}) when is_list(texts) do
+    record = {dns_name!(name), Enum.map(texts, &text!/1)}
+
+    if byte_size(txt_record_line(record)) > 1024 do
+      raise ArgumentError,
+            "dnsmasq TXT record #{inspect(name)} exceeds the 1024-byte configuration line limit"
+    end
+
+    record
+  end
 
   defp normalize_txt({name, text}), do: normalize_txt({name, [text]})
   defp normalize_txt(txt), do: raise(ArgumentError, "Invalid dnsmasq TXT record #{inspect(txt)}")
@@ -355,10 +396,25 @@ defmodule Dnsmasqex.Config do
   defp normalize_mx(mx), do: raise(ArgumentError, "Invalid dnsmasq MX record #{inspect(mx)}")
 
   defp normalize_nftset({domains, sets}) when domains not in [nil, []] and sets not in [nil, []],
-    do: {Enum.map(List.wrap(domains), &domain_pattern!/1), Enum.map(List.wrap(sets), &nftset!/1)}
+    do: {Enum.map(List.wrap(domains), &nftset_domain!/1), Enum.map(List.wrap(sets), &nftset!/1)}
 
   defp normalize_nftset(nftset),
     do: raise(ArgumentError, "Invalid dnsmasq nftset #{inspect(nftset)}")
+
+  defp nftset_domain!("#"), do: "#"
+
+  defp nftset_domain!(domain) when is_binary(domain) do
+    name = domain |> String.trim_leading(".") |> String.replace_suffix(".", "")
+
+    if name == "" or dns_name?(name) do
+      domain
+    else
+      raise ArgumentError, "Invalid dnsmasq nftset domain #{inspect(domain)}"
+    end
+  end
+
+  defp nftset_domain!(domain),
+    do: raise(ArgumentError, "Invalid dnsmasq nftset domain #{inspect(domain)}")
 
   defp nftset!(set) when is_binary(set) do
     if set =~ ~r/\A([46]#)?([[:alnum:]_.-]+#)?[[:alnum:]_.-]+#[[:alnum:]_.-]+\z/ do
@@ -440,14 +496,14 @@ defmodule Dnsmasqex.Config do
   defp ip_list!(ip), do: [ip!(ip)]
 
   defp ip!(ip) do
-    case IP.ip_to_tuple(ip) do
-      {:ok, ip} -> ip
-      {:error, _} -> raise ArgumentError, "Invalid IP address #{inspect(ip)}"
+    with {:ok, address} <- IP.ip_to_tuple(ip),
+         true <- Enum.all?(Tuple.to_list(address), &is_integer/1) do
+      address
+    else
+      _ -> raise ArgumentError, "Invalid IP address #{inspect(ip)}"
     end
   end
 
-  # dnsmasq's domain patterns: "*" matches within the first label, a leading "."
-  # only the subdomains
   defp domain_pattern!(pattern) when is_binary(pattern) do
     domain =
       pattern
@@ -591,9 +647,7 @@ defmodule Dnsmasqex.Config do
       end),
       Enum.map(dnsmasq.cnames, fn {name, target} -> "cname=#{name},#{target}" end),
       Enum.map(dnsmasq.srv_records, &("srv-host=" <> Enum.join(Tuple.to_list(&1), ","))),
-      Enum.map(dnsmasq.txt_records, fn {name, texts} ->
-        Enum.join(["txt-record=#{name}" | Enum.map(texts, &quote_text/1)], ",")
-      end),
+      Enum.map(dnsmasq.txt_records, &txt_record_line/1),
       Enum.map(dnsmasq.mx_records, &("mx-host=" <> Enum.join(Tuple.to_list(&1), ","))),
       Enum.map(dnsmasq.nftsets, fn {domains, sets} ->
         "nftset=/#{Enum.join(domains, "/")}/#{Enum.join(sets, ",")}"
@@ -701,6 +755,9 @@ defmodule Dnsmasqex.Config do
   defp dnsmasq_option(:search), do: "option:domain-search"
   defp dnsmasq_option(:domain), do: "option:domain-name"
   defp dnsmasq_option(:hostname), do: "12"
+
+  defp txt_record_line({name, texts}),
+    do: Enum.join(["txt-record=#{name}" | Enum.map(texts, &quote_text/1)], ",")
 
   defp quote_text(text),
     do: ~s("#{text |> String.replace("\\", "\\\\") |> String.replace("\"", "\\\"")}")

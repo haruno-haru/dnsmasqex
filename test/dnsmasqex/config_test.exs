@@ -211,8 +211,13 @@ defmodule Dnsmasqex.ConfigTest do
     for dnsmasq <- [
           %{records: [{"*.example.com", "192.168.24.1"}]},
           %{records: [{"pi.lan", "pi"}]},
+          %{records: [{"pi.lan", {192, 168, 24, 1.5}}]},
+          %{name_servers: [{0, 0, 0, 0, 0, 0, 0, 1.5}]},
           %{domain_records: [{"bad name", "192.168.24.1"}]},
           %{cnames: [{"www.lan", "bad,target"}]},
+          %{cnames: [{"www.lan", "pi.lan"}, {"WWW.LAN", "pi.lan"}]},
+          %{cnames: [{"www.lan", "WWW.LAN"}]},
+          %{cnames: [{"www.lan", "PI.LAN"}, {"pi.lan", "www.lan"}]},
           %{srv_records: [{"_http._tcp.lan", "pi.lan", 65_536}]},
           %{srv_records: [{"_http._tcp.lan", "pi.lan", 80, 1}]},
           %{txt_records: [{"pi.lan", "line\nbreak"}]},
