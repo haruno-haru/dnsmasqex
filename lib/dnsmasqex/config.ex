@@ -102,8 +102,8 @@ defmodule Dnsmasqex.Config do
       ])
       |> normalize_range(ipv4)
       |> check_lease_time()
-      |> check_path(:hosts_dir)
-      |> check_path(:lease_path)
+      |> check_path(:hosts_dir, "dhcp-hostsdir")
+      |> check_path(:lease_path, "dhcp-leasefile")
       |> check_authoritative()
       |> Map.update(:static_leases, [], &normalize_leases(&1, ipv4))
       |> update_list(:records, &normalize_record/1)
@@ -182,11 +182,12 @@ defmodule Dnsmasqex.Config do
   defp lease_time!(lease_time),
     do: raise(ArgumentError, "Invalid dnsmasq :lease_time #{inspect(lease_time)}")
 
-  defp check_path(dnsmasq, key) do
+  defp check_path(dnsmasq, key, directive) do
     case dnsmasq do
       %{^key => path} when is_binary(path) ->
         if Path.type(path) == :absolute and String.trim(path) == path and
              not Regex.match?(~r/[\x00-\x1f\x7f"]| #/, path) do
+          check_line!("#{directive}=#{path}", "dnsmasq #{inspect(key)}")
           dnsmasq
         else
           raise ArgumentError, "Invalid dnsmasq #{inspect(key)} #{inspect(path)}"
@@ -366,12 +367,7 @@ defmodule Dnsmasqex.Config do
 
   defp normalize_txt({name, texts}) when is_list(texts) do
     record = {dns_name!(name), Enum.map(texts, &text!/1)}
-
-    if byte_size(txt_record_line(record)) > 1024 do
-      raise ArgumentError,
-            "dnsmasq TXT record #{inspect(name)} exceeds the 1024-byte configuration line limit"
-    end
-
+    check_line!(txt_record_line(record), "dnsmasq TXT record #{inspect(name)}")
     record
   end
 
@@ -395,8 +391,14 @@ defmodule Dnsmasqex.Config do
 
   defp normalize_mx(mx), do: raise(ArgumentError, "Invalid dnsmasq MX record #{inspect(mx)}")
 
-  defp normalize_nftset({domains, sets}) when domains not in [nil, []] and sets not in [nil, []],
-    do: {Enum.map(List.wrap(domains), &nftset_domain!/1), Enum.map(List.wrap(sets), &nftset!/1)}
+  defp normalize_nftset({domains, sets})
+       when domains not in [nil, []] and sets not in [nil, []] do
+    nftset =
+      {Enum.map(List.wrap(domains), &nftset_domain!/1), Enum.map(List.wrap(sets), &nftset!/1)}
+
+    check_line!(nftset_line(nftset), "dnsmasq nftset #{inspect(nftset)}")
+    nftset
+  end
 
   defp normalize_nftset(nftset),
     do: raise(ArgumentError, "Invalid dnsmasq nftset #{inspect(nftset)}")
@@ -429,8 +431,15 @@ defmodule Dnsmasqex.Config do
   @ip_list_options [:dns, :router, :ntp]
   @list_options [:search | @ip_list_options]
 
-  defp normalize_options(options, ipv4) when is_map(options),
-    do: Map.new(options, &normalize_option(&1, ipv4))
+  defp normalize_options(options, ipv4) when is_map(options) do
+    options = Map.new(options, &normalize_option(&1, ipv4))
+
+    Enum.each(options, fn {key, _value} = option ->
+      check_line!(String.trim_trailing(option_line(option)), "dnsmasq option #{inspect(key)}")
+    end)
+
+    options
+  end
 
   defp normalize_options(options, _ipv4),
     do: raise(ArgumentError, "Expected a map for dnsmasq :options, got: #{inspect(options)}")
@@ -649,9 +658,7 @@ defmodule Dnsmasqex.Config do
       Enum.map(dnsmasq.srv_records, &("srv-host=" <> Enum.join(Tuple.to_list(&1), ","))),
       Enum.map(dnsmasq.txt_records, &txt_record_line/1),
       Enum.map(dnsmasq.mx_records, &("mx-host=" <> Enum.join(Tuple.to_list(&1), ","))),
-      Enum.map(dnsmasq.nftsets, fn {domains, sets} ->
-        "nftset=/#{Enum.join(domains, "/")}/#{Enum.join(sets, ",")}"
-      end)
+      Enum.map(dnsmasq.nftsets, &nftset_line/1)
     ]
     |> List.flatten()
     |> Enum.map_join(&[&1, "\n"])
@@ -755,6 +762,19 @@ defmodule Dnsmasqex.Config do
   defp dnsmasq_option(:search), do: "option:domain-search"
   defp dnsmasq_option(:domain), do: "option:domain-name"
   defp dnsmasq_option(:hostname), do: "12"
+
+  defp nftset_line({domains, sets}),
+    do: "nftset=/#{Enum.join(domains, "/")}/#{Enum.join(sets, ",")}"
+
+  # dnsmasq reads its files 1024 bytes at a time and parses the rest of a longer
+  # line as a line of its own
+  defp check_line!(line, what) do
+    if byte_size(line) > 1024 do
+      raise ArgumentError, "#{what} exceeds dnsmasq's 1024-byte line limit"
+    end
+
+    :ok
+  end
 
   defp txt_record_line({name, texts}),
     do: Enum.join(["txt-record=#{name}" | Enum.map(texts, &quote_text/1)], ",")

@@ -230,6 +230,29 @@ defmodule Dnsmasqex.ConfigTest do
     end
   end
 
+  test "rejects values that would make dnsmasq split a line" do
+    long_name = Enum.map_join([63, 63, 63, 61], ".", &String.duplicate("a", &1))
+    long_path = "/" <> Enum.join(List.duplicate(String.duplicate("d", 100), 11), "/")
+
+    for dnsmasq <- [
+          %{options: %{search: List.duplicate(long_name, 5)}},
+          %{options: %{43 => String.duplicate("ab:", 400)}},
+          %{nftsets: [{List.duplicate(long_name, 5), ["inet#filter#allowed"]}]},
+          %{hosts_dir: long_path},
+          %{lease_path: long_path}
+        ] do
+      assert_raise ArgumentError, ~r/1024-byte line limit/, fn ->
+        Config.normalize(%{@config | dnsmasq: dnsmasq})
+      end
+    end
+
+    assert %{dnsmasq: %{options: %{search: [_, _, _]}}} =
+             Config.normalize(%{
+               @config
+               | dnsmasq: %{options: %{search: List.duplicate(long_name, 3)}}
+             })
+  end
+
   describe "options" do
     defp options(options),
       do: Config.normalize(%{@config | dnsmasq: %{options: options}}).dnsmasq.options
