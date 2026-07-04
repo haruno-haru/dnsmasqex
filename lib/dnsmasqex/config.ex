@@ -53,8 +53,8 @@ defmodule Dnsmasqex.Config do
   * `:lease_path` - an absolute path for the lease file, so leases survive a
     reboot when it's on a persistent filesystem. Defaults to VintageNet's
     `:tmpdir`
-  * `:hosts_dir` - an absolute path to a directory of `dhcp-host` files. New
-    files are read automatically
+  * `:hosts_dir` - an absolute path to a directory of `dhcp-host` files. It's
+    created if missing, and new files are read automatically
   """
 
   alias VintageNet.Command
@@ -619,7 +619,7 @@ defmodule Dnsmasqex.Config do
             pid_path(tmpdir, ifname)
             | Enum.map(@runtime_options, &(runtime_path(&1, tmpdir, ifname) <> ".new"))
           ] ++ raw_config.cleanup_files,
-        up_cmds: raw_config.up_cmds ++ lease_dir_cmds(dnsmasq),
+        up_cmds: raw_config.up_cmds ++ mkdir_cmds(dnsmasq),
         child_specs: raw_config.child_specs ++ [server, notifier, daemon],
         down_cmds: raw_config.down_cmds ++ [{:fun, Notifications, :clear, [ifname]}]
     }
@@ -627,8 +627,12 @@ defmodule Dnsmasqex.Config do
 
   def add_config(raw_config, _config_without_dnsmasq, _opts), do: raw_config
 
-  defp lease_dir_cmds(%{lease_path: path}), do: [{:fun, File, :mkdir_p, [Path.dirname(path)]}]
-  defp lease_dir_cmds(_dnsmasq), do: []
+  # dnsmasq only watches a hosts directory that exists when it starts
+  defp mkdir_cmds(dnsmasq) do
+    [Map.get(dnsmasq, :hosts_dir), dnsmasq[:lease_path] && Path.dirname(dnsmasq.lease_path)]
+    |> Enum.reject(&is_nil/1)
+    |> Enum.map(&{:fun, File, :mkdir_p, [&1]})
+  end
 
   defp dnsmasq_contents(dnsmasq, ifname, ipv4, tmpdir) do
     [

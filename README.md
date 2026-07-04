@@ -89,8 +89,8 @@ The following fields are supported:
   so clients with leases it doesn't know get addresses right away
 * `:lease_path` - an absolute path for the lease file, so leases survive a
   reboot when it's on a persistent filesystem. Defaults to VintageNet's `:tmpdir`
-* `:hosts_dir` - an absolute path to a directory of `dhcp-host` files. New files
-  are read automatically
+* `:hosts_dir` - an absolute path to a directory of `dhcp-host` files. It's
+  created if missing, and new files are read automatically
 * `:domain` - the local domain. DHCP clients and records without a dot get
   names in it, clients get it as their domain, and its names are never forwarded
 * `:records` - `{name, ip}` pairs for exactly those names, like `:dnsd`

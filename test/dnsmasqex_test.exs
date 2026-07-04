@@ -67,7 +67,7 @@ defmodule DnsmasqexTest do
     raw_config = raw_config(@config)
 
     assert raw_config.type == Dnsmasqex
-    assert raw_config.up_cmds == [:wired_up]
+    assert raw_config.up_cmds == [:wired_up, {:fun, File, :mkdir_p, ["/data/dnsmasq/hosts"]}]
     assert raw_config.source_config.technology == WiredTechnology
     assert raw_config.down_cmds == [{:fun, Notifications, :clear, ["eth1"]}]
 
@@ -267,7 +267,12 @@ defmodule DnsmasqexTest do
 
     assert contents =~ "dhcp-leasefile=/data/dnsmasq/eth1.leases\n"
     assert contents =~ "script-on-renewal\ndhcp-authoritative\n"
-    assert raw_config.up_cmds == [:wired_up, {:fun, File, :mkdir_p, ["/data/dnsmasq"]}]
+
+    assert raw_config.up_cmds == [
+             :wired_up,
+             {:fun, File, :mkdir_p, ["/data/dnsmasq/hosts"]},
+             {:fun, File, :mkdir_p, ["/data/dnsmasq"]}
+           ]
 
     refute dnsmasq_conf(@config) =~ "dhcp-authoritative"
 
