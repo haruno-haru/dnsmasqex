@@ -232,10 +232,11 @@ defmodule Dnsmasqex.ConfigTest do
 
   test "rejects values that would make dnsmasq split a line" do
     long_name = Enum.map_join([63, 63, 63, 61], ".", &String.duplicate("a", &1))
+    shared_suffix = Enum.map_join(1..4, ".", fn _ -> String.duplicate("s", 49) end)
     long_path = "/" <> Enum.join(List.duplicate(String.duplicate("d", 100), 11), "/")
 
     for dnsmasq <- [
-          %{options: %{search: List.duplicate(long_name, 5)}},
+          %{options: %{search: for(i <- 1..10, do: "h#{i}." <> shared_suffix)}},
           %{options: %{43 => String.duplicate("ab:", 400)}},
           %{nftsets: [{List.duplicate(long_name, 5), ["inet#filter#allowed"]}]},
           %{hosts_dir: long_path},
@@ -246,11 +247,41 @@ defmodule Dnsmasqex.ConfigTest do
       end
     end
 
-    assert %{dnsmasq: %{options: %{search: [_, _, _]}}} =
+    assert %{dnsmasq: %{nftsets: [{[_, _, _], _}]}} =
              Config.normalize(%{
                @config
-               | dnsmasq: %{options: %{search: List.duplicate(long_name, 3)}}
+               | dnsmasq: %{nftsets: [{List.duplicate(long_name, 3), "inet#filter#allowed"}]}
              })
+  end
+
+  test "rejects DHCP options longer than 255 bytes, counting dnsmasq's name compression" do
+    names = fn count ->
+      for i <- 1..count, do: "p#{i}#{String.duplicate("q", 28)}.#{String.duplicate("s", 60)}"
+    end
+
+    ips = for i <- 1..64, do: {10, 0, 0, i}
+
+    assert %{dnsmasq: %{options: %{search: [_, _, _, _, _], dns: [_ | _]}}} =
+             Config.normalize(%{
+               @config
+               | dnsmasq: %{options: %{search: names.(5), dns: Enum.take(ips, 63)}}
+             })
+
+    for options <- [
+          %{search: names.(6)},
+          %{
+            search: [
+              String.duplicate("a", 63) <> "." <> String.duplicate("b", 63),
+              String.duplicate("c", 63) <> "." <> String.duplicate("d", 63)
+            ]
+          },
+          %{dns: ips},
+          %{ntp: ips}
+        ] do
+      assert_raise ArgumentError, fn ->
+        Config.normalize(%{@config | dnsmasq: %{options: options}})
+      end
+    end
   end
 
   describe "options" do

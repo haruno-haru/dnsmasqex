@@ -462,11 +462,24 @@ defmodule Dnsmasqex.Config do
     end
   end
 
-  defp normalize_option({option, ips}, _ipv4) when option in @ip_list_options and is_list(ips),
-    do: {option, Enum.map(ips, &ipv4!/1)}
+  # A DHCPv4 option holds at most 255 bytes, and dnsmasq skips longer ones
+  defp normalize_option({option, ips}, _ipv4) when option in @ip_list_options and is_list(ips) do
+    if length(ips) > 63 do
+      raise ArgumentError, "dnsmasq #{inspect(option)} can't have more than 63 addresses"
+    end
 
-  defp normalize_option({:search, names}, _ipv4) when is_list(names),
-    do: {:search, Enum.map(names, &dns_name!/1)}
+    {option, Enum.map(ips, &ipv4!/1)}
+  end
+
+  defp normalize_option({:search, names}, _ipv4) when is_list(names) do
+    names = Enum.map(names, &dns_name!/1)
+
+    if byte_size(Enum.reduce(names, <<>>, &add_search_name/2)) > 255 do
+      raise ArgumentError, "dnsmasq :search domains don't fit in a DHCP option"
+    end
+
+    {:search, names}
+  end
 
   defp normalize_option({option, one_item}, ipv4) when option in @list_options,
     do: normalize_option({option, [one_item]}, ipv4)
@@ -529,6 +542,37 @@ defmodule Dnsmasqex.Config do
 
   defp domain_pattern!(pattern),
     do: raise(ArgumentError, "Invalid dnsmasq domain pattern #{inspect(pattern)}")
+
+  # dnsmasq's RFC 3397 encoding, which points a name's tail at an earlier copy
+  defp add_search_name(name, encoded) do
+    labels = for label <- String.split(name, "."), do: <<byte_size(label), label::binary>>
+    whole = IO.iodata_to_binary([labels, 0])
+
+    Enum.find_value(0..(length(labels) - 1), encoded <> whole, fn i ->
+      tail = IO.iodata_to_binary([Enum.drop(labels, i), 0])
+
+      if offset = find_name(encoded, tail, 0) do
+        IO.iodata_to_binary([encoded, Enum.take(labels, i), <<0b11::2, offset::14>>])
+      end
+    end)
+  end
+
+  defp find_name(encoded, tail, offset) when offset < byte_size(encoded) do
+    if c_string(encoded, offset) == c_string(tail, 0) do
+      offset
+    else
+      find_name(encoded, tail, offset + :binary.at(encoded, offset) + 1)
+    end
+  end
+
+  defp find_name(_encoded, _tail, _offset), do: nil
+
+  defp c_string(binary, offset) do
+    [string | _] =
+      binary |> binary_part(offset, byte_size(binary) - offset) |> :binary.split(<<0>>)
+
+    string
+  end
 
   defp dns_name!(name) do
     if dns_name?(name), do: name, else: raise(ArgumentError, "Invalid DNS name #{inspect(name)}")
