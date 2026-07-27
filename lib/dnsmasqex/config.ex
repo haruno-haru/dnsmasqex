@@ -435,7 +435,10 @@ defmodule Dnsmasqex.Config do
     options = Map.new(options, &normalize_option(&1, ipv4))
 
     Enum.each(options, fn {key, _value} = option ->
-      check_line!(String.trim_trailing(option_line(option)), "dnsmasq option #{inspect(key)}")
+      check_line!(
+        String.replace_suffix(option_line(option), "\n", ""),
+        "dnsmasq option #{inspect(key)}"
+      )
     end)
 
     options
@@ -709,7 +712,10 @@ defmodule Dnsmasqex.Config do
       Enum.map(dnsmasq.nftsets, &nftset_line/1)
     ]
     |> List.flatten()
-    |> Enum.map_join(&[&1, "\n"])
+    |> Enum.map_join(fn line ->
+      check_line!(line, "dnsmasq configuration")
+      [line, "\n"]
+    end)
   end
 
   defp upstream(dnsmasq) do

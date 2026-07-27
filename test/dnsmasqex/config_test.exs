@@ -238,6 +238,7 @@ defmodule Dnsmasqex.ConfigTest do
     for dnsmasq <- [
           %{options: %{search: for(i <- 1..10, do: "h#{i}." <> shared_suffix)}},
           %{options: %{43 => String.duplicate("ab:", 400)}},
+          %{options: %{43 => "value" <> String.duplicate(" ", 1024)}},
           %{nftsets: [{List.duplicate(long_name, 5), ["inet#filter#allowed"]}]},
           %{hosts_dir: long_path},
           %{lease_path: long_path}

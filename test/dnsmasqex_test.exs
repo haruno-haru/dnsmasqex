@@ -63,6 +63,14 @@ defmodule DnsmasqexTest do
     contents
   end
 
+  test "rejects generated paths that exceed dnsmasq's line limit" do
+    tmpdir = "/" <> Enum.join(List.duplicate(String.duplicate("d", 100), 11), "/")
+
+    assert_raise ArgumentError, ~r/1024-byte line limit/, fn ->
+      Dnsmasqex.to_raw_config("eth1", @config, tmpdir: tmpdir)
+    end
+  end
+
   test "keeps the wrapped technology's config and adds dnsmasq" do
     raw_config = raw_config(@config)
 
