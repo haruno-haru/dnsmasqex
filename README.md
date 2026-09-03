@@ -254,7 +254,8 @@ iex> Dnsmasqex.nftables_available?()
 false
 ```
 
-`:nftsets` needs both. Its nftables tables and sets must already exist.
+`:nftsets` needs both. Its nftables tables and sets must already exist, with
+names that nftables accepts without quotes.
 `VintageNet.verify_system/0` checks that dnsmasq can serve DHCP and run the
 script that reports events.
 

@@ -292,6 +292,8 @@ defmodule DnsmasqexTest do
   end
 
   test "adds resolved addresses to nftables sets" do
+    name = String.duplicate("s", 255)
+
     contents =
       dnsmasq_conf(%{
         @config
@@ -299,7 +301,8 @@ defmodule DnsmasqexTest do
             nftsets: [
               {["example.com", ".example.org."],
                ["inet#filter#allowed", "6#ip6#filter#allowed6"]},
-              {"#", "filter#allowed"}
+              {"#", "filter#allowed"},
+              {"example.net", "4#ip##{name}##{name}"}
             ]
           }
       })
@@ -309,11 +312,16 @@ defmodule DnsmasqexTest do
            nftset=/#/filter#allowed
            """
 
+    assert contents =~ "nftset=/example.net/4#ip##{name}##{name}\n"
+
     for nftset <- [
           {[], ["inet#filter#allowed"]},
           {["example.com"], []},
           {["example.com"], ["allowed"]},
           {["example.com"], ["inet#filter#allowed,other"]},
+          {["example.com"], ["unknown#filter#allowed"]},
+          {["example.com"], ["inet##{name}s#allowed"]},
+          {["example.com"], ["inet#filter##{name}s"]},
           {["bad domain"], ["filter#allowed"]},
           {["*.example.com"], ["filter#allowed"]},
           {["*example.com"], ["filter#allowed"]},

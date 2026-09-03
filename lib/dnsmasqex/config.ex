@@ -46,7 +46,8 @@ defmodule Dnsmasqex.Config do
     `{["example.com"], ["inet#filter#allowed"]}`. A set may start with `4#` or
     `6#` to take only that family. Domains include their subdomains; `"#"`
     matches all domains. Wildcards aren't supported. The tables and sets must
-    already exist. Needs `nftset` in
+    already exist and their names must be valid unquoted nftables identifiers.
+    Needs `nftset` in
     `Dnsmasqex.capabilities/0` and `Dnsmasqex.nftables_available?/0`
   * `:authoritative` - `true` when dnsmasq is the only DHCP server on the
     network, so clients with leases it doesn't know get addresses right away
@@ -419,7 +420,8 @@ defmodule Dnsmasqex.Config do
     do: raise(ArgumentError, "Invalid dnsmasq nftset domain #{inspect(domain)}")
 
   defp nftset!(set) when is_binary(set) do
-    if set =~ ~r/\A([46]#)?([[:alnum:]_.-]+#)?[[:alnum:]_.-]+#[[:alnum:]_.-]+\z/ do
+    if set =~
+         ~r/\A([46]#)?((ip|ip6|inet|arp|bridge|netdev)#)?[[:alnum:]_.-]{1,255}#[[:alnum:]_.-]{1,255}\z/ do
       set
     else
       raise ArgumentError, "Invalid nftables set #{inspect(set)}"
