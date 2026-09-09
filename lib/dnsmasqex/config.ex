@@ -33,7 +33,9 @@ defmodule Dnsmasqex.Config do
     * `:serverid`, `:subnet` or `:netmask` - accepted when they match the
       interface, since dnsmasq always sends its own
     * integers - option numbers whose value is passed to dnsmasq unmodified,
-      so use dnsmasq's format, for example `43 => "4d:53:46:54"`
+      so use dnsmasq's format, for example `43 => "4d:53:46:54"`. The caller
+      must keep the encoded payload within 255 bytes; its syntax and payload
+      length aren't validated here
   * `:name_servers` - upstream DNS servers. Without it, dnsmasq follows the name
     servers VintageNet writes to `/etc/resolv.conf`. `[]` forwards nothing
   * `:forward_domains` - `{domain, servers}` pairs that forward a domain and its
@@ -55,7 +57,8 @@ defmodule Dnsmasqex.Config do
     reboot when it's on a persistent filesystem. Defaults to VintageNet's
     `:tmpdir`
   * `:hosts_dir` - an absolute path to a directory of `dhcp-host` files. It's
-    created if missing, and new files are read automatically
+    created if missing, and new files are read automatically. Requires
+    `inotify` in `Dnsmasqex.capabilities/0`
   """
 
   alias VintageNet.Command

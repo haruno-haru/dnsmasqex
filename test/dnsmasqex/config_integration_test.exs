@@ -25,7 +25,11 @@ defmodule Dnsmasqex.ConfigIntegrationTest do
              router: [],
              dns: ["192.168.24.1"],
              ntp: ["192.168.24.1"],
-             search: ["lan", "example.com"],
+             search:
+               for(
+                 i <- 1..5,
+                 do: "p#{i}#{String.duplicate("q", 28)}.#{String.duplicate("s", 60)}"
+               ),
              domain: "lan",
              hostname: "client",
              mtu: 1400
