@@ -403,9 +403,9 @@ defmodule DnsmasqexTest do
       end)
 
       [hosts_path, options_path, records_path, _pid_path] = paths
+      start_server(@config)
 
       %{
-        server: start_server(@config),
         hosts_path: hosts_path,
         options_path: options_path,
         records_path: records_path,
@@ -556,13 +556,12 @@ defmodule DnsmasqexTest do
     end
 
     test "restores the configured values if it restarts", context do
+      configured_leases = runtime("static_leases")
       assert :ok = ioctl(:remove_static_lease, ["aa:bb:cc:dd:ee:ff"])
-      VintageNet.subscribe(["interface", "ioctl0", "dnsmasq", "static_leases"])
-      ref = Process.monitor(context.server)
-      Process.exit(context.server, :kill)
+      stop_supervised!(Server)
+      start_server(@config)
 
-      assert_receive {:DOWN, ^ref, :process, _, :killed}
-      assert_receive {VintageNet, _, [_], [_, _], _}
+      assert runtime("static_leases") == configured_leases
       assert File.read!(context.hosts_path) == @hosts
     end
 
