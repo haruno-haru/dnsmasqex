@@ -422,9 +422,11 @@ defmodule Dnsmasqex.Config do
   defp nftset_domain!(domain),
     do: raise(ArgumentError, "Invalid dnsmasq nftset domain #{inspect(domain)}")
 
+  # nft reads the names unquoted, so they must start with a letter, "_" or "."
   defp nftset!(set) when is_binary(set) do
-    if set =~
-         ~r/\A([46]#)?((ip|ip6|inet|arp|bridge|netdev)#)?[[:alnum:]_.-]{1,255}#[[:alnum:]_.-]{1,255}\z/ do
+    name = "[[:alpha:]_.][[:alnum:]_.-]{0,254}"
+
+    if set =~ ~r/\A([46]#)?((ip|ip6|inet|arp|bridge|netdev)#)?#{name}##{name}\z/ do
       set
     else
       raise ArgumentError, "Invalid nftables set #{inspect(set)}"

@@ -322,6 +322,8 @@ defmodule DnsmasqexTest do
           {["example.com"], ["unknown#filter#allowed"]},
           {["example.com"], ["inet##{name}s#allowed"]},
           {["example.com"], ["inet#filter##{name}s"]},
+          {["example.com"], ["inet#filter#1allowed"]},
+          {["example.com"], ["inet#-filter#allowed"]},
           {["bad domain"], ["filter#allowed"]},
           {["*.example.com"], ["filter#allowed"]},
           {["*example.com"], ["filter#allowed"]},
