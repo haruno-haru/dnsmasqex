@@ -210,6 +210,11 @@ address after the wrapped technology brings up the interface and removes it
 on shutdown. It uses Linux's `ip -6 addr` commands; the wrapped technology
 continues to handle the link and IPv4. DNS listens on both configured families.
 
+The `:ipv6` map accepts only `:method`, `:address` and `:prefix_length` for a
+static address, or `%{method: :disabled}` to leave IPv6 unmanaged. It does not
+disable the kernel's IPv6 stack or configure routes and resolvers; unsupported
+fields are rejected.
+
 This example provides SLAAC and DHCPv6 on a local Ethernet network:
 
 ```elixir

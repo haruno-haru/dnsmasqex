@@ -9,6 +9,9 @@ defmodule Dnsmasqex.Config do
   Set the top-level `:ipv6` to `%{method: :static, address: ip, prefix_length: 64}`
   to have Dnsmasqex configure an IPv6 address. The wrapped technology manages
   the link and `:ipv4`. Use `ipv4: %{method: :disabled}` for IPv6 only.
+  `%{method: :disabled}` leaves IPv6 unmanaged; it does not disable the kernel's
+  IPv6 stack. Other IPv6 fields, including routes and resolvers, aren't supported
+  and are rejected.
 
   * `:start` and `:end` - DHCPv4 address range on the interface's subnet. Without
     them, only static leases get addresses, or only DNS runs if there are none
@@ -82,6 +85,7 @@ defmodule Dnsmasqex.Config do
     `inotify` in `Dnsmasqex.capabilities/0`
   """
 
+  alias Dnsmasqex.Config.Names
   alias Dnsmasqex.Daemon
   alias Dnsmasqex.IPv6
   alias Dnsmasqex.Notifications
@@ -277,7 +281,7 @@ defmodule Dnsmasqex.Config do
   defp normalize_lease({mac, ip}, ipv4), do: {check_mac(mac), lease_ip!(ip, ipv4)}
 
   defp normalize_lease({mac, ip, hostname}, ipv4),
-    do: {check_mac(mac), lease_ip!(ip, ipv4), check_hostname(hostname)}
+    do: {check_mac(mac), lease_ip!(ip, ipv4), Names.hostname!(hostname)}
 
   defp normalize_lease(%{mac: mac, ignore: true} = lease, _ipv4) when map_size(lease) == 2,
     do: %{mac: check_mac(mac), ignore: true}
@@ -288,7 +292,7 @@ defmodule Dnsmasqex.Config do
       |> Map.take([:ip, :hostname, :lease_time])
       |> Map.new(fn
         {:ip, ip} -> {:ip, lease_ip!(ip, ipv4)}
-        {:hostname, hostname} -> {:hostname, check_hostname(hostname)}
+        {:hostname, hostname} -> {:hostname, Names.hostname!(hostname)}
         {:lease_time, lease_time} -> {:lease_time, lease_time!(lease_time)}
       end)
 
@@ -340,25 +344,6 @@ defmodule Dnsmasqex.Config do
 
   defp check_mac(mac), do: raise(ArgumentError, "Invalid MAC address #{inspect(mac)}")
 
-  # dnsmasq reads these as a keyword or a lease time rather than a hostname
-  defp check_hostname(hostname) when hostname in ["ignore", "infinite"],
-    do: raise(ArgumentError, "Invalid hostname #{inspect(hostname)}")
-
-  defp check_hostname(hostname) when is_binary(hostname) and byte_size(hostname) <= 63 do
-    if hostname =~ ~r/\A[[:alnum:]]([[:alnum:]-]*[[:alnum:]])?\z/ and
-         not (hostname =~ ~r/\A\d+[smhdwSMHDW]?\z/) do
-      hostname
-    else
-      raise ArgumentError, "Invalid hostname #{inspect(hostname)}"
-    end
-  end
-
-  defp check_hostname(hostname), do: raise(ArgumentError, "Invalid hostname #{inspect(hostname)}")
-
-  @doc false
-  @spec hostname!(String.t()) :: String.t()
-  def hostname!(hostname), do: check_hostname(hostname)
-
   defp update_list(dnsmasq, key, fun) do
     Map.update(dnsmasq, key, [], fn
       list when is_list(list) -> Enum.map(list, fun)
@@ -366,7 +351,7 @@ defmodule Dnsmasqex.Config do
     end)
   end
 
-  defp normalize_record({name, ip}), do: {dns_name!(name), ip!(ip)}
+  defp normalize_record({name, ip}), do: {Names.dns!(name), ip!(ip)}
 
   defp normalize_record(record),
     do: raise(ArgumentError, "Invalid dnsmasq record #{inspect(record)}")
@@ -377,7 +362,7 @@ defmodule Dnsmasqex.Config do
   defp normalize_domain_record(record),
     do: raise(ArgumentError, "Invalid dnsmasq domain record #{inspect(record)}")
 
-  defp normalize_cname({name, target}), do: {dns_name!(name), dns_name!(target)}
+  defp normalize_cname({name, target}), do: {Names.dns!(name), Names.dns!(target)}
   defp normalize_cname(cname), do: raise(ArgumentError, "Invalid dnsmasq CNAME #{inspect(cname)}")
 
   defp check_cnames(%{cnames: cnames} = dnsmasq) do
@@ -407,19 +392,19 @@ defmodule Dnsmasqex.Config do
   end
 
   defp normalize_srv({name, target, port}) when port in 0..65_535,
-    do: {dns_name!(name), srv_target!(target), port}
+    do: {Names.dns!(name), srv_target!(target), port}
 
   defp normalize_srv({name, target, port, priority, weight})
        when port in 0..65_535 and priority in 0..65_535 and weight in 0..65_535,
-       do: {dns_name!(name), srv_target!(target), port, priority, weight}
+       do: {Names.dns!(name), srv_target!(target), port, priority, weight}
 
   defp normalize_srv(srv), do: raise(ArgumentError, "Invalid dnsmasq SRV record #{inspect(srv)}")
 
   defp srv_target!("."), do: "."
-  defp srv_target!(target), do: dns_name!(target)
+  defp srv_target!(target), do: Names.dns!(target)
 
   defp normalize_txt({name, texts}) when is_list(texts) do
-    record = {dns_name!(name), Enum.map(texts, &text!/1)}
+    record = {Names.dns!(name), Enum.map(texts, &text!/1)}
     check_line!(txt_record_line(record), "dnsmasq TXT record #{inspect(name)}")
     record
   end
@@ -437,10 +422,10 @@ defmodule Dnsmasqex.Config do
 
   defp text!(text), do: raise(ArgumentError, "Invalid dnsmasq TXT string #{inspect(text)}")
 
-  defp normalize_mx({name, target}), do: {dns_name!(name), dns_name!(target)}
+  defp normalize_mx({name, target}), do: {Names.dns!(name), Names.dns!(target)}
 
   defp normalize_mx({name, target, preference}) when preference in 0..65_535,
-    do: {dns_name!(name), dns_name!(target), preference}
+    do: {Names.dns!(name), Names.dns!(target), preference}
 
   defp normalize_mx(mx), do: raise(ArgumentError, "Invalid dnsmasq MX record #{inspect(mx)}")
 
@@ -461,7 +446,7 @@ defmodule Dnsmasqex.Config do
   defp nftset_domain!(domain) when is_binary(domain) do
     name = domain |> String.trim_leading(".") |> String.replace_suffix(".", "")
 
-    if name == "" or dns_name?(name) do
+    if name == "" or Names.dns?(name) do
       domain
     else
       raise ArgumentError, "Invalid dnsmasq nftset domain #{inspect(domain)}"
@@ -561,7 +546,7 @@ defmodule Dnsmasqex.Config do
   end
 
   defp normalize_option({:search, names}, _ipv4) when is_list(names) do
-    names = Enum.map(names, &dns_name!/1)
+    names = Enum.map(names, &Names.dns!/1)
 
     if byte_size(Enum.reduce(names, <<>>, &add_search_name/2)) > 255 do
       raise ArgumentError, "dnsmasq :search domains don't fit in a DHCP option"
@@ -574,7 +559,7 @@ defmodule Dnsmasqex.Config do
     do: normalize_option({option, [one_item]}, ipv4)
 
   defp normalize_option({option, name}, _ipv4) when option in [:domain, :hostname],
-    do: {option, dns_name!(name)}
+    do: {option, Names.dns!(name)}
 
   defp normalize_option({:mtu, mtu}, _ipv4) when mtu in 68..65_535, do: {:mtu, mtu}
 
@@ -594,7 +579,7 @@ defmodule Dnsmasqex.Config do
 
   defp normalize_name_servers(dnsmasq), do: dnsmasq
 
-  defp normalize_domain(%{domain: domain} = dnsmasq), do: %{dnsmasq | domain: dns_name!(domain)}
+  defp normalize_domain(%{domain: domain} = dnsmasq), do: %{dnsmasq | domain: Names.dns!(domain)}
   defp normalize_domain(dnsmasq), do: dnsmasq
 
   defp normalize_forward_domain({domain, servers}),
@@ -622,7 +607,7 @@ defmodule Dnsmasqex.Config do
       |> String.replace_prefix(".", "")
       |> String.replace_suffix(".", "")
 
-    if domain == "" or dns_name?(domain) do
+    if domain == "" or Names.dns?(domain) do
       pattern
     else
       raise ArgumentError, "Invalid dnsmasq domain pattern #{inspect(pattern)}"
@@ -662,19 +647,6 @@ defmodule Dnsmasqex.Config do
 
     string
   end
-
-  @doc false
-  @spec dns_name!(String.t()) :: String.t()
-  def dns_name!(name) do
-    if dns_name?(name), do: name, else: raise(ArgumentError, "Invalid DNS name #{inspect(name)}")
-  end
-
-  defp dns_name?(name) when is_binary(name) and byte_size(name) <= 253 do
-    label = ~r/\A[[:alnum:]_]([[:alnum:]_-]{0,61}[[:alnum:]_])?\z/
-    name |> String.split(".") |> Enum.all?(&(&1 =~ label))
-  end
-
-  defp dns_name?(_name), do: false
 
   defp ipv4!(ip) do
     case IP.ip_to_tuple(ip) do
@@ -926,8 +898,8 @@ defmodule Dnsmasqex.Config do
   defp nftset_line({domains, sets}),
     do: "nftset=/#{Enum.join(domains, "/")}/#{Enum.join(sets, ",")}"
 
-  # dnsmasq reads its files 1024 bytes at a time and parses the rest of a longer
-  # line as a line of its own
+  # Keep compatibility with older dnsmasq releases (including 2.90), which read
+  # 1024 bytes at a time and parse the remainder as a separate line.
   defp check_line!(line, what) do
     if byte_size(line) > 1024 do
       raise ArgumentError, "#{what} exceeds dnsmasq's 1024-byte line limit"

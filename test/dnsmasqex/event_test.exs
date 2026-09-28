@@ -99,4 +99,43 @@ defmodule Dnsmasqex.EventTest do
     assert %Event{mac: "aa:bb:cc:dd:ee:ff", duid: nil, client_id: nil} =
              Event.new(["arp-add", "aa:bb:cc:dd:ee:ff", "fd12:3456:789a:1::10"], %{})
   end
+
+  test "neighbors don't inherit unrelated DHCP environment fields" do
+    env = %{
+      "DNSMASQ_CLIENT_ID" => "01:aa:bb:cc:dd:ee:ff",
+      "DNSMASQ_MAC" => "aa:bb:cc:dd:ee:01",
+      "DNSMASQ_IAID" => "42",
+      "DNSMASQ_INTERFACE" => "eth1",
+      "DNSMASQ_TIME_REMAINING" => "3600"
+    }
+
+    for name <- ["arp-add", "arp-del"], ip <- ["192.168.24.10", "fd12:3456:789a:1::10"] do
+      assert Event.new([name, "aa:bb:cc:dd:ee:ff", ip], env) ==
+               %Event{name: name, mac: "aa:bb:cc:dd:ee:ff", ip: ip}
+    end
+  end
+
+  test "lease fields belong to the address family reported by dnsmasq" do
+    env = %{
+      "DNSMASQ_CLIENT_ID" => "01:aa:bb:cc:dd:ee:ff",
+      "DNSMASQ_VENDOR_CLASS" => "ipv4-client",
+      "DNSMASQ_CPEWAN_OUI" => "001122",
+      "DNSMASQ_IAID" => "42",
+      "DNSMASQ_SERVER_DUID" => "00:03:00:01:aa:bb:cc:dd:ee:01",
+      "DNSMASQ_VENDOR_CLASS_ID" => "1234",
+      "DNSMASQ_VENDOR_CLASS0" => "ipv6-client"
+    }
+
+    assert %Event{iaid: nil, server_duid: nil, vendor_class_id: nil, vendor_classes: nil} =
+             Event.new(["add", "aa:bb:cc:dd:ee:ff", "192.168.24.10"], env)
+
+    assert %Event{vendor_class: nil, cpewan: nil} =
+             Event.new(["add", "00:03:00:01:aa:bb:cc:dd:ee:ff", "fd12:3456:789a:1::10"], env)
+  end
+
+  test "malformed addresses aren't interpreted as IPv6 lease identities" do
+    for ip <- ["invalid:address", "192.168.24.999", "fd12:::10"] do
+      assert Event.new(["add", "aa:bb:cc:dd:ee:ff", ip], %{}) == %Event{name: "add"}
+    end
+  end
 end

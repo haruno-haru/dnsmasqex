@@ -14,6 +14,14 @@ defmodule Dnsmasqex.Server do
 
   require Logger
 
+  @lease_commands [:static_leases, :add_static_lease, :put_static_lease, :remove_static_lease]
+  @lease6_commands [
+    :static_leases6,
+    :add_static_lease6,
+    :put_static_lease6,
+    :remove_static_lease6
+  ]
+
   @spec start_link(keyword()) :: GenServer.on_start()
   def start_link(args) do
     GenServer.start_link(__MODULE__, args, name: via_name(Keyword.fetch!(args, :ifname)))
@@ -42,18 +50,23 @@ defmodule Dnsmasqex.Server do
       ifname: Keyword.fetch!(args, :ifname),
       tmpdir: Keyword.fetch!(args, :tmpdir),
       config: config,
-      dhcp_enabled?: Config.dhcp_enabled?(config.dnsmasq),
+      dhcp_enabled?:
+        match?(%{ipv4: %{method: :static}}, config) and Config.dhcp_enabled?(config.dnsmasq),
       dhcpv6_enabled?: IPv6.dhcp_enabled?(config.dnsmasq)
     }
 
     # Rewrite the files too, since they may hold changes from before a restart
-    for option <- Config.runtime_options() do
+    Enum.each(Config.runtime_options(), fn option ->
       :ok = write_file(state, option)
-      publish(state, option)
-    end
+      :ok = publish(state, option)
+    end)
 
-    with {:error, reason} <- signal(state) do
-      Logger.warning("[dnsmasqex(#{state.ifname})] Can't reload dnsmasq: #{reason}")
+    case signal(state) do
+      :ok ->
+        :ok
+
+      {:error, reason} ->
+        Logger.warning("[dnsmasqex(#{state.ifname})] Can't reload dnsmasq: #{reason}")
     end
 
     {:ok, state}
@@ -61,16 +74,14 @@ defmodule Dnsmasqex.Server do
 
   @impl GenServer
   def handle_call({:update, command, args}, _from, state) do
-    with {:ok, option, value} <- change(command, args, state),
+    with {:ok, option, value} <- validate_change(command, args, state),
          new_state = put_in(state.config.dnsmasq[option], value),
          :ok <- write_file(new_state, option) do
-      publish(new_state, option)
+      :ok = publish(new_state, option)
       {:reply, signal(new_state), new_state}
     else
-      error -> {:reply, error, state}
+      {:error, _reason} = error -> {:reply, error, state}
     end
-  rescue
-    e in ArgumentError -> {:reply, {:error, Exception.message(e)}, state}
   end
 
   def handle_call(:reload, _from, state) do
@@ -78,17 +89,16 @@ defmodule Dnsmasqex.Server do
     {:reply, reply, state}
   end
 
-  @lease_commands [:static_leases, :add_static_lease, :put_static_lease, :remove_static_lease]
+  # Only input validation errors become replies. Failures after writing a file
+  # must not be reported as rejected input while retaining the previous state.
+  defp validate_change(command, args, state) do
+    change(command, args, state)
+  rescue
+    error in ArgumentError -> {:error, Exception.message(error)}
+  end
 
   defp change(command, _args, %{dhcp_enabled?: false}) when command in @lease_commands,
     do: {:error, :dhcp_disabled}
-
-  @lease6_commands [
-    :static_leases6,
-    :add_static_lease6,
-    :put_static_lease6,
-    :remove_static_lease6
-  ]
 
   defp change(command, _args, %{dhcpv6_enabled?: false}) when command in @lease6_commands,
     do: {:error, :dhcpv6_disabled}
@@ -97,23 +107,28 @@ defmodule Dnsmasqex.Server do
        when option in [:static_leases, :options, :records, :static_leases6, :options6],
        do: {:ok, option, normalize(state, option, value)}
 
-  defp change(command, [lease], state) when command in [:add_static_lease6, :put_static_lease6] do
+  defp change(:add_static_lease6, [lease], state) do
     [lease] = normalize(state, :static_leases6, [lease])
     leases = state.config.dnsmasq.static_leases6
 
-    others =
-      if command == :put_static_lease6,
-        do: Enum.reject(leases, &(&1.duid == lease.duid)),
-        else: leases
+    with :ok <- check_unused(leases, lease, :duid_in_use, & &1.duid),
+         :ok <- check_unused(leases, lease, :ip_in_use, & &1.ip) do
+      {:ok, :static_leases6, leases ++ [lease]}
+    end
+  end
 
-    with :ok <- check_unused(others, lease, :duid_in_use, & &1.duid),
-         :ok <- check_unused(others, lease, :ip_in_use, & &1.ip) do
-      {:ok, :static_leases6, normalize(state, :static_leases6, others ++ [lease])}
+  defp change(:put_static_lease6, [lease], state) do
+    [lease] = normalize(state, :static_leases6, [lease])
+    others = Enum.reject(state.config.dnsmasq.static_leases6, &(&1.duid == lease.duid))
+
+    with :ok <- check_unused(others, lease, :ip_in_use, & &1.ip) do
+      {:ok, :static_leases6, others ++ [lease]}
     end
   end
 
   defp change(:remove_static_lease6, [duid], state) when is_binary(duid) do
-    leases = Enum.reject(state.config.dnsmasq.static_leases6, &(&1.duid == String.downcase(duid)))
+    duid = String.downcase(duid)
+    leases = Enum.reject(state.config.dnsmasq.static_leases6, &(&1.duid == duid))
     {:ok, :static_leases6, leases}
   end
 
@@ -123,7 +138,7 @@ defmodule Dnsmasqex.Server do
 
     with :ok <- check_unused(leases, lease, :mac_in_use, &Config.lease_mac/1),
          :ok <- check_unused(leases, lease, :ip_in_use, &Config.lease_ip/1) do
-      {:ok, :static_leases, normalize(state, :static_leases, leases ++ [lease])}
+      {:ok, :static_leases, leases ++ [lease]}
     end
   end
 
@@ -132,7 +147,7 @@ defmodule Dnsmasqex.Server do
     others = other_leases(state.config.dnsmasq.static_leases, lease)
 
     with :ok <- check_unused(others, lease, :ip_in_use, &Config.lease_ip/1) do
-      {:ok, :static_leases, normalize(state, :static_leases, others ++ [lease])}
+      {:ok, :static_leases, others ++ [lease]}
     end
   end
 
@@ -185,7 +200,9 @@ defmodule Dnsmasqex.Server do
     do: Enum.reject(leases, &(Config.lease_mac(&1) == Config.lease_mac(lease)))
 
   defp check_unused(leases, lease, reason, key) do
-    case key.(lease) && Enum.find(leases, &(key.(&1) == key.(lease))) do
+    value = key.(lease)
+
+    case value && Enum.find(leases, &(key.(&1) == value)) do
       nil -> :ok
       existing -> {:error, {reason, existing}}
     end

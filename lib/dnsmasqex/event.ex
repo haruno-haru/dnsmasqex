@@ -55,6 +55,8 @@ defmodule Dnsmasqex.Event do
       %Dnsmasqex.Event{name: "tftp"}
   """
 
+  alias VintageNet.IP
+
   @enforce_keys [:name]
   defstruct [
     :name,
@@ -104,37 +106,54 @@ defmodule Dnsmasqex.Event do
 
   @type cpewan :: %{oui: String.t() | nil, serial: String.t() | nil, class: String.t() | nil}
 
-  @client_actions ["add", "old", "del", "arp-add", "arp-del"]
-
   @doc """
   Create an event from the arguments and environment of dnsmasq's script
   """
   @spec new([String.t()], %{optional(String.t()) => String.t()}) :: t()
-  def new([name, mac, ip | hostname], env) when name in @client_actions do
-    dhcpv6? = name in ["add", "old", "del"] and String.contains?(ip, ":")
+  def new([name, mac, ip | _args], _env) when name in ["arp-add", "arp-del"],
+    do: %__MODULE__{name: name, mac: mac, ip: ip}
 
-    %__MODULE__{
+  def new([name, identity, ip | hostname], env) when name in ["add", "old", "del"] do
+    event = %__MODULE__{
       name: name,
-      mac: if(dhcpv6?, do: env["DNSMASQ_MAC"], else: mac),
       ip: ip,
       hostname: List.first(hostname),
       supplied_hostname: env["DNSMASQ_SUPPLIED_HOSTNAME"],
       old_hostname: env["DNSMASQ_OLD_HOSTNAME"],
-      client_id: if(dhcpv6?, do: mac, else: env["DNSMASQ_CLIENT_ID"]),
-      duid: if(dhcpv6?, do: mac),
-      iaid: env["DNSMASQ_IAID"],
-      server_duid: env["DNSMASQ_SERVER_DUID"],
       interface: env["DNSMASQ_INTERFACE"],
-      vendor_class: env["DNSMASQ_VENDOR_CLASS"],
-      vendor_class_id: env["DNSMASQ_VENDOR_CLASS_ID"],
-      vendor_classes: numbered_classes(env, "DNSMASQ_VENDOR_CLASS"),
       tags: tags(env["DNSMASQ_TAGS"]),
       time_remaining: time_remaining(env["DNSMASQ_TIME_REMAINING"]),
-      requested_options: requested_options(env["DNSMASQ_REQUESTED_OPTIONS"], dhcpv6?),
       user_classes: numbered_classes(env, "DNSMASQ_USER_CLASS"),
-      mud_url: env["DNSMASQ_MUD_URL"],
-      cpewan: cpewan(env)
+      mud_url: env["DNSMASQ_MUD_URL"]
     }
+
+    case IP.ip_to_tuple(ip) do
+      {:ok, {_, _, _, _}} ->
+        %{
+          event
+          | mac: identity,
+            client_id: env["DNSMASQ_CLIENT_ID"],
+            vendor_class: env["DNSMASQ_VENDOR_CLASS"],
+            requested_options: requested_options(env["DNSMASQ_REQUESTED_OPTIONS"], 255),
+            cpewan: cpewan(env)
+        }
+
+      {:ok, {_, _, _, _, _, _, _, _}} ->
+        %{
+          event
+          | mac: env["DNSMASQ_MAC"],
+            client_id: identity,
+            duid: identity,
+            iaid: env["DNSMASQ_IAID"],
+            server_duid: env["DNSMASQ_SERVER_DUID"],
+            vendor_class_id: env["DNSMASQ_VENDOR_CLASS_ID"],
+            vendor_classes: numbered_classes(env, "DNSMASQ_VENDOR_CLASS"),
+            requested_options: requested_options(env["DNSMASQ_REQUESTED_OPTIONS"], 65_535)
+        }
+
+      {:error, _reason} ->
+        %__MODULE__{name: name}
+    end
   end
 
   def new([name | _args], _env), do: %__MODULE__{name: name}
@@ -142,11 +161,10 @@ defmodule Dnsmasqex.Event do
   defp tags(nil), do: nil
   defp tags(tags), do: String.split(tags)
 
-  defp requested_options(nil, _dhcpv6?), do: nil
+  defp requested_options(nil, _maximum), do: nil
 
-  defp requested_options(options, dhcpv6?) do
+  defp requested_options(options, maximum) do
     numbers = options |> String.split(",") |> Enum.map(&Integer.parse/1)
-    maximum = if dhcpv6?, do: 65_535, else: 255
 
     if Enum.all?(numbers, &match?({number, ""} when number >= 0 and number <= maximum, &1)),
       do: Enum.map(numbers, &elem(&1, 0))

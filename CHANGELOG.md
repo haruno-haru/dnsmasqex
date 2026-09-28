@@ -7,6 +7,8 @@
 * Support DHCPv6 options and reservation updates without restarting dnsmasq.
 * Parse IPv6 leases and DHCPv6 events with DUIDs and IAIDs, and report IPv6
   neighbors on the configured subnet.
+* Reject unsupported IPv6 interface fields, exclude scoped IPv6 neighbors,
+  and keep runtime DHCP checks and event metadata specific to their address family.
 
 ## v0.1.1
 

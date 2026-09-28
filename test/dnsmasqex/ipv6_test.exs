@@ -151,6 +151,21 @@ defmodule Dnsmasqex.IPv6Test do
     assert_raise ArgumentError, fn -> Dnsmasqex.normalize(config) end
   end
 
+  test "rejects unsupported IPv6 interface fields instead of silently dropping them" do
+    for ipv6 <- [
+          Map.put(@config.ipv6, :gateway, "fd12:3456:789a:1::2"),
+          Map.put(@config.ipv6, :prefix_lenght, 64),
+          %{method: :disabled, address: "fd12:3456:789a:1::1"}
+        ] do
+      assert_raise ArgumentError, ~r/Invalid IPv6 interface configuration/, fn ->
+        Dnsmasqex.normalize(%{@config | ipv6: ipv6, dnsmasq: %{}})
+      end
+    end
+
+    config = %{@config | ipv6: %{method: :disabled}, dnsmasq: %{}}
+    assert Dnsmasqex.normalize(config).ipv6 == %{method: :disabled}
+  end
+
   test "allows a longer DHCPv6 prefix when router advertisements are disabled" do
     config =
       @config |> put_in([:ipv6, :prefix_length], 112) |> put_in([:dnsmasq, :enable_ra], false)
@@ -212,7 +227,14 @@ defmodule Dnsmasqex.IPv6Test do
 
   test "changes IPv6 reservations and options without disturbing IPv4", %{tmp_dir: tmpdir} do
     ifname = "dnsmasq_ipv6"
-    config = Dnsmasqex.normalize(@config)
+
+    config =
+      @config
+      |> Map.put(:ipv4, %{method: :static, address: "192.168.24.1", prefix_length: 24})
+      |> put_in([:dnsmasq, :static_leases], [{"aa:bb:cc:dd:ee:ff", "192.168.24.100"}])
+      |> put_in([:dnsmasq, :options], %{dns: ["192.168.24.1"]})
+      |> Dnsmasqex.normalize()
+
     on_exit(fn -> Notifications.clear(ifname) end)
     start_supervised!({Server, ifname: ifname, tmpdir: tmpdir, config: config})
     path = Config.runtime_path(:static_leases6, tmpdir, ifname)
@@ -236,8 +258,41 @@ defmodule Dnsmasqex.IPv6Test do
              "option6:dns-server,[::]\n"
 
     assert :ok = Server.update(ifname, :delete_option6, [:dns])
-    assert File.read!(Config.runtime_path(:options, tmpdir, ifname)) == ""
+
+    assert File.read!(Config.runtime_path(:options6, tmpdir, ifname)) ==
+             "option6:domain-search,lan\n"
+
+    assert File.read!(Config.runtime_path(:options, tmpdir, ifname)) ==
+             "option:dns-server,192.168.24.1\n"
+
+    assert File.read!(Config.runtime_path(:static_leases, tmpdir, ifname)) ==
+             "aa:bb:cc:dd:ee:ff,192.168.24.100,infinite\n"
+
     assert VintageNet.get(["interface", ifname, "dnsmasq", "static_leases6"]) != []
+  end
+
+  test "IPv6 reservation changes cannot take another client's address", %{tmp_dir: tmpdir} do
+    ifname = "dnsmasq_ipv6_conflicts"
+    config = Dnsmasqex.normalize(@config)
+    on_exit(fn -> Notifications.clear(ifname) end)
+    start_supervised!({Server, ifname: ifname, tmpdir: tmpdir, config: config})
+    [existing] = config.dnsmasq.static_leases6
+    lease = %{duid: "00:03:00:01:aa:bb:cc:dd:ee:01", ip: existing.ip}
+
+    for command <- [:add_static_lease6, :put_static_lease6] do
+      assert {:error, {:ip_in_use, ^existing}} = Server.update(ifname, command, [lease])
+    end
+
+    # Inserting with put is allowed, but replacing it must still respect the other reservation.
+    assert :ok =
+             Server.update(ifname, :put_static_lease6, [%{lease | ip: "fd12:3456:789a:1::101"}])
+
+    assert {:error, {:ip_in_use, ^existing}} = Server.update(ifname, :put_static_lease6, [lease])
+
+    assert [^existing, %{duid: duid}] =
+             VintageNet.get(["interface", ifname, "dnsmasq", "static_leases6"])
+
+    assert duid == lease.duid
   end
 
   test "doesn't enable address allocation through a runtime update", %{tmp_dir: tmpdir} do
@@ -248,5 +303,51 @@ defmodule Dnsmasqex.IPv6Test do
 
     assert {:error, :dhcpv6_disabled} =
              Server.update(ifname, :static_leases6, [@config.dnsmasq.static_leases6])
+  end
+
+  test "a hosts directory doesn't enable DHCPv4 on an IPv6-only interface", %{tmp_dir: tmpdir} do
+    config =
+      @config
+      |> put_in([:dnsmasq, :hosts_dir], Path.join(tmpdir, "hosts"))
+      |> Dnsmasqex.normalize()
+
+    ifname = "dnsmasq_ipv6_hosts"
+    on_exit(fn -> Notifications.clear(ifname) end)
+    start_supervised!({Server, ifname: ifname, tmpdir: tmpdir, config: config})
+
+    for {command, args} <- [
+          static_leases: [[]],
+          add_static_lease: [{"aa:bb:cc:dd:ee:ff", "192.168.24.100"}],
+          put_static_lease: [{"aa:bb:cc:dd:ee:ff", "192.168.24.100"}],
+          remove_static_lease: ["aa:bb:cc:dd:ee:ff"]
+        ] do
+      assert {:error, :dhcp_disabled} = Server.update(ifname, command, args)
+    end
+  end
+
+  test "failed IPv6 updates preserve files, published values and subsequent changes", %{
+    tmp_dir: tmpdir
+  } do
+    ifname = "dnsmasq_ipv6_errors"
+    config = Dnsmasqex.normalize(@config)
+    on_exit(fn -> Notifications.clear(ifname) end)
+    start_supervised!({Server, ifname: ifname, tmpdir: tmpdir, config: config})
+    path = Config.runtime_path(:static_leases6, tmpdir, ifname)
+    property = ["interface", ifname, "dnsmasq", "static_leases6"]
+    original = File.read!(path)
+    lease = %{duid: "00:03:00:01:aa:bb:cc:dd:ee:01", ip: "fd12:3456:789a:1::101"}
+
+    assert {:error, message} = Server.update(ifname, :add_static_lease6, [%{lease | ip: "::1"}])
+    assert message =~ "Expected a global or unique-local IPv6 address"
+
+    File.mkdir!(path <> ".new")
+    assert {:error, :eisdir} = Server.update(ifname, :add_static_lease6, [lease])
+    assert File.read!(path) == original
+    assert VintageNet.get(property) == config.dnsmasq.static_leases6
+
+    File.rmdir!(path <> ".new")
+    assert :ok = Server.update(ifname, :add_static_lease6, [lease])
+    assert File.read!(path) == original <> "id:#{lease.duid},[#{lease.ip}],infinite\n"
+    assert length(VintageNet.get(property)) == 2
   end
 end

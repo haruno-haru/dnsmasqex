@@ -149,6 +149,25 @@ defmodule Dnsmasqex.NotificationsTest do
     assert VintageNet.get(["interface", @ifname, "dhcpd", "leases"]) == nil
   end
 
+  test "excludes scoped IPv6 neighbors even when a broad prefix contains them", %{
+    context: context
+  } do
+    context = %{
+      context
+      | subnets: [%{address: {0xFD12, 0x3456, 0x789A, 1, 0, 0, 0, 1}, prefix_length: 1}]
+    }
+
+    for ip <- ["fe80::10", "febf::10", "ff02::1"] do
+      Notifications.dispatch(["arp-add", "aa:bb:cc:dd:ee:ff", ip], %{}, context)
+      assert VintageNet.get(["interface", @ifname, "dnsmasq", "event"]) == nil
+    end
+
+    Notifications.dispatch(["arp-add", "aa:bb:cc:dd:ee:ff", "fd12:3456:789a:1::10"], %{}, context)
+
+    assert %Event{ip: "fd12:3456:789a:1::10"} =
+             VintageNet.get(["interface", @ifname, "dnsmasq", "event"])
+  end
+
   defp raw_config(tmp_dir) do
     config =
       Config.normalize(%{

@@ -48,6 +48,10 @@ defmodule Dnsmasqex.Notifications do
   # dnsmasq reports neighbors on every interface, not only its own
   defp on_subnet?(%Event{name: name, ip: ip}, context) when name in ["arp-add", "arp-del"] do
     case IP.ip_to_tuple(ip) do
+      {:ok, {first, _, _, _, _, _, _, _}}
+      when first in 0xFE80..0xFEBF or first in 0xFF00..0xFFFF ->
+        false
+
       {:ok, ip} ->
         Enum.any?(context.subnets, fn subnet ->
           tuple_size(ip) == tuple_size(subnet.address) and

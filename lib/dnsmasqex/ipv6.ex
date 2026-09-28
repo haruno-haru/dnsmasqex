@@ -5,36 +5,44 @@
 defmodule Dnsmasqex.IPv6 do
   @moduledoc false
 
+  alias Dnsmasqex.Config.Names
   alias VintageNet.Interface.RawConfig
   alias VintageNet.IP
 
   @modes [:stateful, :static, :slaac, :stateless, :ra_only]
   @ra_modes [:slaac, :stateless, :ra_only]
 
+  @type interface :: %{
+          method: :static,
+          address: :inet.ip6_address(),
+          prefix_length: 1..128
+        }
+
   @spec normalize(map()) :: map()
-  def normalize(%{ipv6: %{method: :static, address: address, prefix_length: prefix}} = config)
-      when prefix in 1..128 do
-    address = unicast!(address)
-    Map.put(config, :ipv6, %{method: :static, address: address, prefix_length: prefix})
+  def normalize(
+        %{ipv6: %{method: :static, address: address, prefix_length: prefix} = ipv6} = config
+      )
+      when prefix in 1..128 and map_size(ipv6) == 3 do
+    %{config | ipv6: %{ipv6 | address: unicast!(address)}}
   end
 
-  def normalize(%{ipv6: %{method: :disabled}} = config),
-    do: Map.put(config, :ipv6, %{method: :disabled})
+  def normalize(%{ipv6: %{method: :disabled} = ipv6} = config) when map_size(ipv6) == 1,
+    do: config
 
   def normalize(%{ipv6: ipv6}),
     do:
       raise(
         ArgumentError,
-        "Expected static IPv6 with :address and :prefix_length, got: #{inspect(ipv6)}"
+        "Invalid IPv6 interface configuration; expected :static with :address and :prefix_length or :disabled, got: #{inspect(ipv6)}"
       )
 
   def normalize(config), do: config
 
-  @spec interface(map()) :: map() | nil
+  @spec interface(map()) :: interface() | nil
   def interface(%{ipv6: %{method: :static} = ipv6}), do: ipv6
   def interface(_config), do: nil
 
-  @spec normalize_dnsmasq(map(), map() | nil) :: map()
+  @spec normalize_dnsmasq(map(), interface() | nil) :: map()
   def normalize_dnsmasq(dnsmasq, ipv6) do
     dnsmasq =
       dnsmasq
@@ -59,9 +67,10 @@ defmodule Dnsmasqex.IPv6 do
 
   defp normalize_services(dnsmasq, ipv6) do
     dnsmasq =
-      if Map.has_key?(dnsmasq, :dhcpv6),
-        do: Map.update!(dnsmasq, :dhcpv6, &normalize_range(&1, ipv6)),
-        else: dnsmasq
+      case dnsmasq do
+        %{dhcpv6: range} -> %{dnsmasq | dhcpv6: normalize_range(range, ipv6)}
+        %{} -> dnsmasq
+      end
 
     check_ra(dnsmasq, ipv6)
 
@@ -77,7 +86,7 @@ defmodule Dnsmasqex.IPv6 do
   defp check_ra(dnsmasq, ipv6) do
     enable_ra = Map.get(dnsmasq, :enable_ra, false)
 
-    unless is_boolean(enable_ra), do: raise(ArgumentError, "dnsmasq :enable_ra must be a boolean")
+    if not is_boolean(enable_ra), do: raise(ArgumentError, "dnsmasq :enable_ra must be a boolean")
 
     ra? = enable_ra or get_in(dnsmasq, [:dhcpv6, :mode]) in @ra_modes
 
@@ -91,14 +100,13 @@ defmodule Dnsmasqex.IPv6 do
     check_ra_lifetime(dnsmasq, ra?)
   end
 
-  defp check_ra_lifetime(%{ra_lifetime: lifetime}, ra?) do
-    unless ra? and (lifetime === 0 or lifetime in 600..9000),
-      do:
-        raise(
-          ArgumentError,
-          "dnsmasq :ra_lifetime requires RA and must be 0 or 600..9000 seconds"
-        )
-  end
+  defp check_ra_lifetime(%{ra_lifetime: lifetime}, true)
+       when lifetime === 0 or lifetime in 600..9000,
+       do: :ok
+
+  defp check_ra_lifetime(%{ra_lifetime: _lifetime}, _ra?),
+    do:
+      raise(ArgumentError, "dnsmasq :ra_lifetime requires RA and must be 0 or 600..9000 seconds")
 
   defp check_ra_lifetime(_dnsmasq, _ra?), do: :ok
 
@@ -106,7 +114,7 @@ defmodule Dnsmasqex.IPv6 do
     unknown = Map.keys(range) -- [:start, :end, :mode, :lease_time]
     mode = Map.get(range, :mode, :stateful)
 
-    unless unknown == [] and mode in @modes,
+    if unknown != [] or mode not in @modes,
       do: raise(ArgumentError, "Invalid dnsmasq :dhcpv6 #{inspect(range)}")
 
     if ipv6.prefix_length < 64,
@@ -124,9 +132,10 @@ defmodule Dnsmasqex.IPv6 do
         range
       end
 
-    if Map.has_key?(range, :lease_time),
-      do: Map.update!(range, :lease_time, &lease_time!/1),
-      else: range
+    case range do
+      %{lease_time: time} -> %{range | lease_time: lease_time!(time)}
+      %{} -> range
+    end
   end
 
   defp normalize_range(range, _ipv6),
@@ -148,12 +157,12 @@ defmodule Dnsmasqex.IPv6 do
   defp normalize_leases(leases, ipv6) when is_list(leases) do
     leases = Enum.map(leases, &normalize_lease(&1, ipv6))
 
-    for key <- [:duid, :ip] do
+    Enum.each([:duid, :ip], fn key ->
       values = Enum.map(leases, &Map.fetch!(&1, key))
 
       if Enum.uniq(values) != values,
         do: raise(ArgumentError, "Duplicate IPv6 static lease #{key}")
-    end
+    end)
 
     leases
   end
@@ -161,20 +170,16 @@ defmodule Dnsmasqex.IPv6 do
   defp normalize_leases(leases, _ipv6),
     do: raise(ArgumentError, "Expected a list for :static_leases6, got: #{inspect(leases)}")
 
-  defp normalize_lease(%{duid: duid, ip: ip} = lease, ipv6) when not is_nil(ipv6) do
-    unless Map.keys(lease) -- [:duid, :ip, :hostname, :lease_time] == [],
+  defp normalize_lease(%{duid: _duid, ip: _ip} = lease, %{method: :static} = ipv6) do
+    if Map.keys(lease) -- [:duid, :ip, :hostname, :lease_time] != [],
       do: raise(ArgumentError, "Invalid IPv6 static lease #{inspect(lease)}")
 
-    lease = %{lease | duid: duid!(duid), ip: lease_ip!(ip, ipv6)}
-
-    lease =
-      if Map.has_key?(lease, :hostname),
-        do: Map.update!(lease, :hostname, &Dnsmasqex.Config.hostname!/1),
-        else: lease
-
-    if Map.has_key?(lease, :lease_time),
-      do: Map.update!(lease, :lease_time, &lease_time!/1),
-      else: lease
+    Map.new(lease, fn
+      {:duid, duid} -> {:duid, duid!(duid)}
+      {:ip, ip} -> {:ip, lease_ip!(ip, ipv6)}
+      {:hostname, hostname} -> {:hostname, Names.hostname!(hostname)}
+      {:lease_time, time} -> {:lease_time, lease_time!(time)}
+    end)
   end
 
   defp normalize_lease(lease, _ipv6),
@@ -200,7 +205,7 @@ defmodule Dnsmasqex.IPv6 do
     ip = unicast!(ip)
     subnet = IP.to_subnet(ipv6.address, ipv6.prefix_length)
 
-    unless IP.to_subnet(ip, ipv6.prefix_length) == subnet and ip != ipv6.address and ip != subnet,
+    if IP.to_subnet(ip, ipv6.prefix_length) != subnet or ip == ipv6.address or ip == subnet,
       do:
         raise(
           ArgumentError,
@@ -225,7 +230,7 @@ defmodule Dnsmasqex.IPv6 do
     do: {name, Enum.map(List.wrap(ips), &address!/1)}
 
   defp normalize_option({:search, names}) when not is_nil(names),
-    do: {:search, Enum.map(List.wrap(names), &Dnsmasqex.Config.dns_name!/1)}
+    do: {:search, Enum.map(List.wrap(names), &Names.dns!/1)}
 
   defp normalize_option({number, value}) when number in 1..65_535 and is_binary(value) do
     if String.contains?(value, ["\n", "\r", "\0"]),
@@ -281,7 +286,7 @@ defmodule Dnsmasqex.IPv6 do
   def dhcp_enabled?(%{dhcpv6: %{mode: mode}}), do: mode in [:stateful, :static, :slaac]
   def dhcp_enabled?(_dnsmasq), do: false
 
-  @spec config_lines(map(), map() | nil, String.t()) :: [String.t()]
+  @spec config_lines(map(), interface() | nil, String.t()) :: [String.t()]
   def config_lines(%{dhcpv6: range} = dnsmasq, ipv6, ifname) do
     fields =
       case range do
