@@ -5,10 +5,10 @@
 defmodule DnsmasqexTest do
   use ExUnit.Case
 
-  alias VintageNet.Interface.RawConfig
   alias Dnsmasqex.Leases
   alias Dnsmasqex.Notifications
   alias Dnsmasqex.Server
+  alias VintageNet.Interface.RawConfig
 
   defmodule WiredTechnology do
     @moduledoc false

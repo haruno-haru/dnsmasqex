@@ -5,9 +5,9 @@
 defmodule Dnsmasqex.Notifications do
   @moduledoc false
 
-  alias VintageNet.IP
   alias Dnsmasqex.Event
   alias Dnsmasqex.Leases
+  alias VintageNet.IP
 
   @typedoc false
   @type context :: %{

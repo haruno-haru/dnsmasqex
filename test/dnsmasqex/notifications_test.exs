@@ -5,10 +5,10 @@
 defmodule Dnsmasqex.NotificationsTest do
   use ExUnit.Case
 
-  alias VintageNet.Interface.RawConfig
   alias Dnsmasqex.Config
   alias Dnsmasqex.Event
   alias Dnsmasqex.Notifications
+  alias VintageNet.Interface.RawConfig
 
   @moduletag :tmp_dir
   @ifname "dnsmasq_test0"

@@ -46,8 +46,7 @@ defmodule Dnsmasqex.MixProject do
       licenses: ["Apache-2.0"],
       links: %{
         "GitHub" => @source_url,
-        "REUSE Compliance" =>
-          "https://api.reuse.software/info/github.com/haruno-haru/dnsmasqex"
+        "REUSE Compliance" => "https://api.reuse.software/info/github.com/haruno-haru/dnsmasqex"
       }
     }
   end

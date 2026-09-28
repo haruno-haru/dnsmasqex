@@ -5,8 +5,8 @@
 defmodule Dnsmasqex.ConfigIntegrationTest do
   use ExUnit.Case, async: true
 
-  alias VintageNet.Interface.RawConfig
   alias Dnsmasqex.Config
+  alias VintageNet.Interface.RawConfig
 
   @moduletag :dnsmasq
   @moduletag :linux

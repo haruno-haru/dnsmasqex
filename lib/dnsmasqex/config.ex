@@ -61,12 +61,12 @@ defmodule Dnsmasqex.Config do
     `inotify` in `Dnsmasqex.capabilities/0`
   """
 
-  alias VintageNet.Command
-  alias VintageNet.Interface.RawConfig
-  alias VintageNet.IP
   alias Dnsmasqex.Daemon
   alias Dnsmasqex.Notifications
   alias Dnsmasqex.Server
+  alias VintageNet.Command
+  alias VintageNet.Interface.RawConfig
+  alias VintageNet.IP
 
   @runtime_options [:static_leases, :options, :records]
 
