@@ -15,7 +15,7 @@ To use it, add `:dnsmasqex` to your `mix` dependencies like this:
 ```elixir
 def deps do
   [
-    {:dnsmasqex, "~> 0.1.0", targets: @all_targets}
+    {:dnsmasqex, "~> 0.1.1", targets: @all_targets}
   ]
 end
 ```
