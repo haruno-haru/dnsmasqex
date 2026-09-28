@@ -2,7 +2,8 @@
 [![REUSE status](https://api.reuse.software/badge/github.com/haruno-haru/dnsmasqex)](https://api.reuse.software/info/github.com/haruno-haru/dnsmasqex)
 
 `Dnsmasqex` adds [dnsmasq](https://thekelleys.org.uk/dnsmasq/doc.html)
-DHCP and DNS servers to `VintageNet` interfaces. It wraps the technology that
+DHCPv4, DHCPv6, IPv6 router advertisements and DNS servers to `VintageNet`
+interfaces. It wraps the technology that
 manages the interface, such as
 [`VintageNetEthernet`](https://github.com/nerves-networking/vintage_net_ethernet)
 or [`VintageNetWiFi`](https://github.com/nerves-networking/vintage_net_wifi) in
@@ -32,7 +33,7 @@ end
 
 ## Using
 
-Dnsmasqex runs on an interface with a static IPv4 address. Set `:type`
+Dnsmasqex runs on an interface with a static IPv4 or IPv6 address. Set `:type`
 to `Dnsmasqex`, `:technology` to the technology that manages the
 interface, and put the dnsmasq settings under `:dnsmasq`. For example, to hand
 out addresses on a second Ethernet port:
@@ -72,9 +73,10 @@ In the above, IP addresses were passed as strings for convenience, but it's also
 possible to pass tuples like `{192, 168, 24, 1}`. VintageNet internally works
 with tuples.
 
-The following fields are supported:
+The following fields are supported under `:dnsmasq`. IPv6-specific settings
+are described in [IPv6 and dual stack](#ipv6-and-dual-stack).
 
-* `:start` and `:end` - DHCP address range on the interface's subnet. Without
+* `:start` and `:end` - DHCPv4 address range on the interface's subnet. Without
   them, only static leases get addresses, or only DNS runs if there are none
 * `:lease_time` - seconds, from 120 to 4_294_967_294, or `:infinite`
 * `:static_leases` - `{mac, ip}` or `{mac, ip, hostname}` tuples with infinite
@@ -96,7 +98,8 @@ The following fields are supported:
   `inotify` in `Dnsmasqex.capabilities/0`
 * `:domain` - the local domain. DHCP clients and records without a dot get
   names in it, clients get it as their domain, and its names are never forwarded
-* `:records` - `{name, ip}` pairs for exactly those names, like `:dnsd`
+* `:records` - `{name, ip}` pairs for exactly those names, like `:dnsd`.
+  IPv4 addresses produce A records and IPv6 addresses produce AAAA records
 * `:domain_records` - `{domain, ip}` pairs that also answer every subdomain. The
   domain may use dnsmasq's patterns, such as `"*.example.com"` for only the
   subdomains, or be `"#"` for every name not found elsewhere
@@ -199,6 +202,87 @@ dnsmasq: %{
 }
 ```
 
+## IPv6 and dual stack
+
+Set the interface's `:ipv6` address alongside `:ipv4` for dual stack, or use
+`ipv4: %{method: :disabled}` for IPv6 only. Dnsmasqex adds the static IPv6
+address after the wrapped technology brings up the interface and removes it
+on shutdown. It uses Linux's `ip -6 addr` commands; the wrapped technology
+continues to handle the link and IPv4. DNS listens on both configured families.
+
+This example provides SLAAC and DHCPv6 on a local Ethernet network:
+
+```elixir
+VintageNet.configure("eth1", %{
+  type: Dnsmasqex,
+  technology: VintageNetEthernet,
+  ipv4: %{method: :static, address: "192.168.24.1", prefix_length: 24},
+  ipv6: %{method: :static, address: "fd12:3456:789a:1::1", prefix_length: 64},
+  dnsmasq: %{
+    start: "192.168.24.10",
+    end: "192.168.24.99",
+    domain: "lan",
+    dhcpv6: %{
+      start: "fd12:3456:789a:1::10",
+      end: "fd12:3456:789a:1::99",
+      mode: :slaac,
+      lease_time: 3600
+    },
+    ra_lifetime: 0,
+    options6: %{dns: ["fd12:3456:789a:1::1"], search: ["lan"]},
+    static_leases6: [
+      %{duid: "00:03:00:01:aa:bb:cc:dd:ee:ff", ip: "fd12:3456:789a:1::100", hostname: "esp32"}
+    ],
+    records: [{"gateway.lan", "192.168.24.1"}, {"gateway.lan", "fd12:3456:789a:1::1"}],
+    name_servers: ["1.1.1.1", "2606:4700:4700::1111"]
+  }
+})
+```
+
+`:dhcpv6` supports these modes:
+
+Mode | Behavior
+---- | --------
+`:stateful` | Default. Allocate addresses from `:start` to `:end`; add `enable_ra: true` to advertise the prefix and router
+`:slaac` | Allocate DHCPv6 addresses and advertise SLAAC; requires `:start` and `:end`
+`:static` | Allocate only configured IPv6 reservations; add `enable_ra: true` for advertisements
+`:stateless` | Advertise SLAAC and provide DHCPv6 options without allocating addresses
+`:ra_only` | Advertise SLAAC without running DHCPv6
+
+The last three modes take no address pool. `:lease_time` inside `:dhcpv6`
+accepts seconds from 120 to 4_294_967_294 or `:infinite`. DHCPv6 requires a
+prefix length of 64..128; advertisements require /64. Addresses must be on the
+interface's subnet. Pools cannot contain the server's address, and reservations
+cannot use it or the subnet-router anycast address (the subnet's all-zero host
+part). This release supports a single static IPv6 prefix per interface; prefix
+delegation and DHCPv6 client configuration are outside its scope.
+
+`:enable_ra` defaults to `false`; `:slaac`, `:stateless` and `:ra_only` enable
+advertisements themselves. `:ra_lifetime` controls the advertised default route:
+`0` advertises the prefix without claiming to be a gateway, as in the local
+network example, and 600..9000 sets its lifetime in seconds. Omit it to use
+dnsmasq's default. For Internet routing, configure a routed prefix, upstream
+routes and kernel IPv6 forwarding separately. Dnsmasqex does not enable forwarding.
+
+`:static_leases6` accepts maps with a client `:duid` and `:ip`, plus optional
+`:hostname` and `:lease_time`. DUIDs are colon-separated hex bytes, are compared
+case-insensitively and must be unique; IPs must also be unique. The default
+lease time is infinite. Reservations imply `dhcpv6: %{mode: :static}` when no
+`:dhcpv6` setting is present. Use the client's actual DUID from a lease or event;
+it need not contain its MAC address.
+
+`:options6` is independent of DHCPv4's `:options`. It supports `:dns` and `:ntp`
+IPv6 address lists, `:search` domain lists, and integer DHCPv6 option numbers
+whose string values use dnsmasq's `option6:` syntax. IPv6 addresses in raw
+values need brackets, for example `%{23 => "[fd12:3456:789a:1::1]"}`. Named
+options add the brackets automatically. `dns: []` suppresses the default DNS
+option. Raw option payload types and encoded lengths are the caller's responsibility.
+
+For IPv6 DNS alone, configure `:ipv6` and omit `:dhcpv6`, `:static_leases6` and
+`:enable_ra`. Records, domain records, upstream servers and domain-specific
+forwarding accept either IP family. DHCPv6 and advertisements require `:ipv6`
+and `:dhcpv6` to be `true` in `Dnsmasqex.capabilities/0`, plus IPv6 in the kernel.
+
 ## Changing leases, options and records at runtime
 
 The static leases, DHCP options and `:records` can change without
@@ -228,6 +312,15 @@ Command                | Arguments           | Description
 `:put_option`          | `[option, value]`   | Set one DHCP option
 `:delete_option`       | `[option]`          | Remove one DHCP option
 `:reload`              | `[]`                | Read the `:hosts_dir` files again
+
+IPv6 uses `:static_leases6`, `:add_static_lease6`, `:put_static_lease6`,
+`:remove_static_lease6`, `:options6`, `:put_option6` and `:delete_option6` with
+the same argument shapes. IPv6 reservations are identified by DUID, so
+`:remove_static_lease6` takes `[duid]`, and duplicate clients return
+`{:error, {:duid_in_use, lease}}`. Lease updates return `{:error, :dhcpv6_disabled}`
+unless stateful DHCPv6 was enabled when the server started. These updates do
+not change the address pool or advertisement mode; use `VintageNet.configure/2`
+to change those.
 
 `ips` may be one address or a list. Invalid values return `{:error, reason}`
 and leave the current ones in place. Lease commands return
@@ -271,11 +364,13 @@ technology reports the following:
 
 Property                | Values                       | Description
 ----------------------- | ---------------------------- | -----------
-`dhcpd/leases`          | `[%{}, ...]`                 | Current leases, in the same format as VintageNet's `:dhcpd`. `leasetime` is `:infinity` for infinite leases
+`dhcpd/leases`          | `[%{}, ...]`                 | Current IPv4 and IPv6 leases. IPv4 retains VintageNet's `:dhcpd` format. `leasetime` is `:infinity` for infinite leases
 `dnsmasq/event`         | `%Dnsmasqex.Event{}` | The latest lease or neighbor event
 `dnsmasq/static_leases` | `[lease, ...]`               | The static leases in use
 `dnsmasq/options`       | `%{option => value}`         | The DHCP options in use
 `dnsmasq/records`       | `[{name, ip}, ...]`          | The records in use
+`dnsmasq/static_leases6` | `[lease, ...]`              | The IPv6 reservations in use
+`dnsmasq/options6`      | `%{option => value}`        | The DHCPv6 options in use
 
 A lease looks like this:
 
@@ -287,6 +382,11 @@ A lease looks like this:
   leasetime: 600
 }
 ```
+
+IPv6 leases have `lease_mac: nil`, `lease_duid` and `lease_iaid`; dnsmasq's
+lease file does not store their MAC addresses. IAIDs are strings, with a `T`
+prefix for temporary leases. SLAAC addresses are not DHCP leases and do not
+appear in this list.
 
 ### Events
 
@@ -322,6 +422,12 @@ iex> flush()
 See `Dnsmasqex.Event` for all the fields. dnsmasq checks the neighbor
 table at most every 90 seconds, so `"arp-del"` can arrive minutes after a client
 goes away. The interface's `lower_up` property changes as soon as the link does.
+
+DHCPv6 events include `:duid`, `:iaid` and `:server_duid`; `:client_id` also
+contains the client DUID. `:mac` is set only when dnsmasq reports it. Neighbor
+events retain their MAC address and include either family on the configured
+subnets. Link-local IPv6 neighbors are excluded because dnsmasq's neighbor
+script arguments do not identify their interface.
 
 ## Debugging
 

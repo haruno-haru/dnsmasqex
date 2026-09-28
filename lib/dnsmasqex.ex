@@ -183,13 +183,20 @@ defmodule Dnsmasqex do
     :add_static_lease,
     :put_static_lease,
     :remove_static_lease,
+    :static_leases6,
+    :add_static_lease6,
+    :put_static_lease6,
+    :remove_static_lease6,
     :records,
     :add_record,
     :put_record,
     :remove_record,
     :options,
     :put_option,
-    :delete_option
+    :delete_option,
+    :options6,
+    :put_option6,
+    :delete_option6
   ]
 
   defp run_ioctl(ifname, :reload, _args, %{dnsmasq: _}), do: Server.reload(ifname)

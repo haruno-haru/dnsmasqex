@@ -12,8 +12,7 @@ defmodule Dnsmasqex.Notifications do
   @typedoc false
   @type context :: %{
           ifname: VintageNet.ifname(),
-          address: :inet.ip4_address(),
-          prefix_length: VintageNet.prefix_length(),
+          subnets: [%{address: :inet.ip_address(), prefix_length: VintageNet.prefix_length()}],
           lease_path: Path.t()
         }
 
@@ -49,9 +48,12 @@ defmodule Dnsmasqex.Notifications do
   # dnsmasq reports neighbors on every interface, not only its own
   defp on_subnet?(%Event{name: name, ip: ip}, context) when name in ["arp-add", "arp-del"] do
     case IP.ip_to_tuple(ip) do
-      {:ok, {_, _, _, _} = ip} ->
-        IP.to_subnet(ip, context.prefix_length) ==
-          IP.to_subnet(context.address, context.prefix_length)
+      {:ok, ip} ->
+        Enum.any?(context.subnets, fn subnet ->
+          tuple_size(ip) == tuple_size(subnet.address) and
+            IP.to_subnet(ip, subnet.prefix_length) ==
+              IP.to_subnet(subnet.address, subnet.prefix_length)
+        end)
 
       _ ->
         false

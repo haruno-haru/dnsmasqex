@@ -19,8 +19,7 @@ defmodule Dnsmasqex.NotificationsTest do
     %{
       context: %{
         ifname: @ifname,
-        address: {192, 168, 24, 1},
-        prefix_length: 24,
+        subnets: [%{address: {192, 168, 24, 1}, prefix_length: 24}],
         lease_path: Path.join(tmp_dir, "dnsmasq.#{@ifname}.leases")
       }
     }
@@ -104,11 +103,50 @@ defmodule Dnsmasqex.NotificationsTest do
     assert daemon_args[:opts][:env]["BEAM_NOTIFY_OPTIONS"] =~ "-e"
   end
 
-  test "ignores invalid and IPv6 neighbors", %{context: context} do
+  test "ignores invalid neighbors and unconfigured address families", %{context: context} do
     for ip <- ["invalid", "2001:db8::1"] do
       assert :ok = Notifications.dispatch(["arp-add", "aa:bb:cc:dd:ee:ff", ip], %{}, context)
       assert VintageNet.get(["interface", @ifname, "dnsmasq", "event"]) == nil
     end
+  end
+
+  test "publishes neighbors on the configured IPv6 subnet only", %{context: context} do
+    context = %{
+      context
+      | subnets: [
+          %{address: {0xFD12, 0x3456, 0x789A, 1, 0, 0, 0, 1}, prefix_length: 64} | context.subnets
+        ]
+    }
+
+    property = ["interface", @ifname, "dnsmasq", "event"]
+
+    for ip <- ["fd12:3456:789a:2::10", "fe80::10", "ff02::1"] do
+      Notifications.dispatch(["arp-add", "aa:bb:cc:dd:ee:ff", ip], %{}, context)
+      assert VintageNet.get(property) == nil
+    end
+
+    Notifications.dispatch(["arp-add", "aa:bb:cc:dd:ee:ff", "fd12:3456:789a:1::10"], %{}, context)
+    assert %Event{ip: "fd12:3456:789a:1::10"} = VintageNet.get(property)
+  end
+
+  test "publishes DHCPv6 leases and clears them on shutdown", %{context: context} do
+    duid = "00:03:00:01:aa:bb:cc:dd:ee:ff"
+    File.write!(context.lease_path, "1600 42 fd12:3456:789a:1::10 esp32 #{duid}\n")
+
+    Notifications.dispatch(
+      ["add", duid, "fd12:3456:789a:1::10", "esp32"],
+      %{"DNSMASQ_IAID" => "42"},
+      context
+    )
+
+    assert %Event{duid: ^duid, mac: nil} =
+             VintageNet.get(["interface", @ifname, "dnsmasq", "event"])
+
+    assert [%{lease_iaid: "42", lease_duid: ^duid, lease_mac: nil}] =
+             VintageNet.get(["interface", @ifname, "dhcpd", "leases"])
+
+    Notifications.clear(@ifname)
+    assert VintageNet.get(["interface", @ifname, "dhcpd", "leases"]) == nil
   end
 
   defp raw_config(tmp_dir) do

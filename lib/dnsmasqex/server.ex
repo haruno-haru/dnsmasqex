@@ -10,6 +10,7 @@ defmodule Dnsmasqex.Server do
   use GenServer
 
   alias Dnsmasqex.Config
+  alias Dnsmasqex.IPv6
 
   require Logger
 
@@ -41,7 +42,8 @@ defmodule Dnsmasqex.Server do
       ifname: Keyword.fetch!(args, :ifname),
       tmpdir: Keyword.fetch!(args, :tmpdir),
       config: config,
-      dhcp_enabled?: Config.dhcp_enabled?(config.dnsmasq)
+      dhcp_enabled?: Config.dhcp_enabled?(config.dnsmasq),
+      dhcpv6_enabled?: IPv6.dhcp_enabled?(config.dnsmasq)
     }
 
     # Rewrite the files too, since they may hold changes from before a restart
@@ -81,8 +83,39 @@ defmodule Dnsmasqex.Server do
   defp change(command, _args, %{dhcp_enabled?: false}) when command in @lease_commands,
     do: {:error, :dhcp_disabled}
 
-  defp change(option, [value], state) when option in [:static_leases, :options, :records],
-    do: {:ok, option, normalize(state, option, value)}
+  @lease6_commands [
+    :static_leases6,
+    :add_static_lease6,
+    :put_static_lease6,
+    :remove_static_lease6
+  ]
+
+  defp change(command, _args, %{dhcpv6_enabled?: false}) when command in @lease6_commands,
+    do: {:error, :dhcpv6_disabled}
+
+  defp change(option, [value], state)
+       when option in [:static_leases, :options, :records, :static_leases6, :options6],
+       do: {:ok, option, normalize(state, option, value)}
+
+  defp change(command, [lease], state) when command in [:add_static_lease6, :put_static_lease6] do
+    [lease] = normalize(state, :static_leases6, [lease])
+    leases = state.config.dnsmasq.static_leases6
+
+    others =
+      if command == :put_static_lease6,
+        do: Enum.reject(leases, &(&1.duid == lease.duid)),
+        else: leases
+
+    with :ok <- check_unused(others, lease, :duid_in_use, & &1.duid),
+         :ok <- check_unused(others, lease, :ip_in_use, & &1.ip) do
+      {:ok, :static_leases6, normalize(state, :static_leases6, others ++ [lease])}
+    end
+  end
+
+  defp change(:remove_static_lease6, [duid], state) when is_binary(duid) do
+    leases = Enum.reject(state.config.dnsmasq.static_leases6, &(&1.duid == String.downcase(duid)))
+    {:ok, :static_leases6, leases}
+  end
 
   defp change(:add_static_lease, [lease], state) do
     [lease] = normalize(state, :static_leases, [lease])
@@ -134,6 +167,14 @@ defmodule Dnsmasqex.Server do
 
   defp change(:delete_option, [key], state),
     do: {:ok, :options, Map.drop(state.config.dnsmasq.options, [key | option_aliases(key)])}
+
+  defp change(:put_option6, [key, value], state) do
+    options = Map.put(state.config.dnsmasq.options6, key, value)
+    {:ok, :options6, normalize(state, :options6, options)}
+  end
+
+  defp change(:delete_option6, [key], state),
+    do: {:ok, :options6, Map.delete(state.config.dnsmasq.options6, key)}
 
   defp change(command, args, _state),
     do: {:error, "Invalid dnsmasq ioctl #{inspect(command)} #{inspect(args)}"}

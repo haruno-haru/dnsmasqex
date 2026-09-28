@@ -17,7 +17,12 @@ defmodule Dnsmasqex.Event do
   * `:supplied_hostname` - the hostname the client asked for
   * `:old_hostname` - the hostname that was removed from the lease
   * `:client_id` - the DHCP client identifier
+  * `:duid` - the DHCPv6 client DUID, also exposed as `:client_id`
+  * `:iaid` - the DHCPv6 IAID as a string, prefixed by `T` for temporary addresses
+  * `:server_duid` - the DHCPv6 server DUID
+  * `:interface` - the interface reported for a DHCP lease
   * `:vendor_class` - the DHCP vendor class
+  * `:vendor_class_id` and `:vendor_classes` - DHCPv6 vendor enterprise ID and classes
   * `:tags` - the tags set during the DHCP transaction
   * `:time_remaining` - seconds until the lease expires
   * `:requested_options` - the DHCP option numbers the client asked for, in
@@ -59,7 +64,13 @@ defmodule Dnsmasqex.Event do
     :supplied_hostname,
     :old_hostname,
     :client_id,
+    :duid,
+    :iaid,
+    :server_duid,
+    :interface,
     :vendor_class,
+    :vendor_class_id,
+    :vendor_classes,
     :tags,
     :time_remaining,
     :requested_options,
@@ -76,10 +87,16 @@ defmodule Dnsmasqex.Event do
           supplied_hostname: String.t() | nil,
           old_hostname: String.t() | nil,
           client_id: String.t() | nil,
+          duid: String.t() | nil,
+          iaid: String.t() | nil,
+          server_duid: String.t() | nil,
+          interface: String.t() | nil,
           vendor_class: String.t() | nil,
+          vendor_class_id: String.t() | nil,
+          vendor_classes: [String.t()] | nil,
           tags: [String.t()] | nil,
           time_remaining: non_neg_integer() | nil,
-          requested_options: [byte()] | nil,
+          requested_options: [0..65_535] | nil,
           user_classes: [String.t()] | nil,
           mud_url: String.t() | nil,
           cpewan: cpewan() | nil
@@ -94,19 +111,27 @@ defmodule Dnsmasqex.Event do
   """
   @spec new([String.t()], %{optional(String.t()) => String.t()}) :: t()
   def new([name, mac, ip | hostname], env) when name in @client_actions do
+    dhcpv6? = name in ["add", "old", "del"] and String.contains?(ip, ":")
+
     %__MODULE__{
       name: name,
-      mac: mac,
+      mac: if(dhcpv6?, do: env["DNSMASQ_MAC"], else: mac),
       ip: ip,
       hostname: List.first(hostname),
       supplied_hostname: env["DNSMASQ_SUPPLIED_HOSTNAME"],
       old_hostname: env["DNSMASQ_OLD_HOSTNAME"],
-      client_id: env["DNSMASQ_CLIENT_ID"],
+      client_id: if(dhcpv6?, do: mac, else: env["DNSMASQ_CLIENT_ID"]),
+      duid: if(dhcpv6?, do: mac),
+      iaid: env["DNSMASQ_IAID"],
+      server_duid: env["DNSMASQ_SERVER_DUID"],
+      interface: env["DNSMASQ_INTERFACE"],
       vendor_class: env["DNSMASQ_VENDOR_CLASS"],
+      vendor_class_id: env["DNSMASQ_VENDOR_CLASS_ID"],
+      vendor_classes: numbered_classes(env, "DNSMASQ_VENDOR_CLASS"),
       tags: tags(env["DNSMASQ_TAGS"]),
       time_remaining: time_remaining(env["DNSMASQ_TIME_REMAINING"]),
-      requested_options: requested_options(env["DNSMASQ_REQUESTED_OPTIONS"]),
-      user_classes: user_classes(env),
+      requested_options: requested_options(env["DNSMASQ_REQUESTED_OPTIONS"], dhcpv6?),
+      user_classes: numbered_classes(env, "DNSMASQ_USER_CLASS"),
       mud_url: env["DNSMASQ_MUD_URL"],
       cpewan: cpewan(env)
     }
@@ -117,19 +142,20 @@ defmodule Dnsmasqex.Event do
   defp tags(nil), do: nil
   defp tags(tags), do: String.split(tags)
 
-  defp requested_options(nil), do: nil
+  defp requested_options(nil, _dhcpv6?), do: nil
 
-  defp requested_options(options) do
+  defp requested_options(options, dhcpv6?) do
     numbers = options |> String.split(",") |> Enum.map(&Integer.parse/1)
+    maximum = if dhcpv6?, do: 65_535, else: 255
 
-    if Enum.all?(numbers, &match?({number, ""} when number in 0..255, &1)),
+    if Enum.all?(numbers, &match?({number, ""} when number >= 0 and number <= maximum, &1)),
       do: Enum.map(numbers, &elem(&1, 0))
   end
 
-  defp user_classes(env) do
+  defp numbered_classes(env, prefix) do
     classes =
       Stream.iterate(0, &(&1 + 1))
-      |> Stream.map(&env["DNSMASQ_USER_CLASS#{&1}"])
+      |> Stream.map(&env["#{prefix}#{&1}"])
       |> Enum.take_while(& &1)
 
     if classes != [], do: classes

@@ -60,4 +60,43 @@ defmodule Dnsmasqex.EventTest do
       assert event.requested_options == nil
     end
   end
+
+  test "parses DHCPv6 script arguments and environment as emitted by dnsmasq" do
+    duid = "00:03:00:01:aa:bb:cc:dd:ee:ff"
+    args = ["add", duid, "fd12:3456:789a:1::10", "esp32"]
+
+    env = %{
+      "DNSMASQ_IAID" => "T42",
+      "DNSMASQ_SERVER_DUID" => "00:01:00:01:aa:bb:cc:dd",
+      "DNSMASQ_MAC" => "aa:bb:cc:dd:ee:ff",
+      "DNSMASQ_INTERFACE" => "eth1",
+      "DNSMASQ_VENDOR_CLASS_ID" => "1234",
+      "DNSMASQ_VENDOR_CLASS0" => "embedded",
+      "DNSMASQ_VENDOR_CLASS1" => "ethernet",
+      "DNSMASQ_REQUESTED_OPTIONS" => "23,24,256,65535"
+    }
+
+    assert %Event{
+             duid: ^duid,
+             client_id: ^duid,
+             iaid: "T42",
+             mac: "aa:bb:cc:dd:ee:ff",
+             server_duid: "00:01:00:01:aa:bb:cc:dd",
+             interface: "eth1",
+             vendor_class: nil,
+             vendor_class_id: "1234",
+             vendor_classes: ["embedded", "ethernet"],
+             requested_options: [23, 24, 256, 65_535]
+           } = Event.new(args, env)
+
+    assert %Event{duid: ^duid, mac: nil} = Event.new(args, %{})
+
+    assert %Event{requested_options: nil} =
+             Event.new(args, %{"DNSMASQ_REQUESTED_OPTIONS" => "65536"})
+  end
+
+  test "IPv6 neighbor events still carry MAC addresses" do
+    assert %Event{mac: "aa:bb:cc:dd:ee:ff", duid: nil, client_id: nil} =
+             Event.new(["arp-add", "aa:bb:cc:dd:ee:ff", "fd12:3456:789a:1::10"], %{})
+  end
 end

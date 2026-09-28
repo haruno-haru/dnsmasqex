@@ -8,34 +8,7 @@ defmodule DnsmasqexTest do
   alias Dnsmasqex.Leases
   alias Dnsmasqex.Notifications
   alias Dnsmasqex.Server
-  alias VintageNet.Interface.RawConfig
-
-  defmodule WiredTechnology do
-    @moduledoc false
-    @behaviour VintageNet.Technology
-
-    alias VintageNet.IP.IPv4Config
-
-    @impl VintageNet.Technology
-    def normalize(config), do: IPv4Config.normalize(config)
-
-    @impl VintageNet.Technology
-    def to_raw_config(ifname, config, _opts) do
-      %RawConfig{
-        ifname: ifname,
-        type: __MODULE__,
-        source_config: config,
-        required_ifnames: [ifname],
-        up_cmds: [:wired_up]
-      }
-    end
-
-    @impl VintageNet.Technology
-    def ioctl(_ifname, _command, _args), do: {:error, :unsupported}
-
-    @impl VintageNet.Technology
-    def check_system(_opts), do: :ok
-  end
+  alias Dnsmasqex.Test.WiredTechnology
 
   @config %{
     type: Dnsmasqex,
@@ -83,14 +56,18 @@ defmodule DnsmasqexTest do
              "/tmp/vintage_net/dnsmasq.eth1.pid",
              "/tmp/vintage_net/dnsmasq.eth1.hosts.new",
              "/tmp/vintage_net/dnsmasq.eth1.options.new",
-             "/tmp/vintage_net/dnsmasq.eth1.records.new"
+             "/tmp/vintage_net/dnsmasq.eth1.records.new",
+             "/tmp/vintage_net/dnsmasq.eth1.hosts6.new",
+             "/tmp/vintage_net/dnsmasq.eth1.options6.new"
            ]
 
     assert [
              {"/tmp/vintage_net/dnsmasq.conf.eth1", contents},
              {"/tmp/vintage_net/dnsmasq.eth1.hosts", hosts},
              {"/tmp/vintage_net/dnsmasq.eth1.options", options},
-             {"/tmp/vintage_net/dnsmasq.eth1.records", records}
+             {"/tmp/vintage_net/dnsmasq.eth1.records", records},
+             {"/tmp/vintage_net/dnsmasq.eth1.hosts6", ""},
+             {"/tmp/vintage_net/dnsmasq.eth1.options6", ""}
            ] = raw_config.files
 
     assert contents == """
@@ -108,6 +85,8 @@ defmodule DnsmasqexTest do
            dhcp-range=192.168.24.10,192.168.24.99,3600
            dhcp-hostsfile=/tmp/vintage_net/dnsmasq.eth1.hosts
            dhcp-optsfile=/tmp/vintage_net/dnsmasq.eth1.options
+           dhcp-hostsfile=/tmp/vintage_net/dnsmasq.eth1.hosts6
+           dhcp-optsfile=/tmp/vintage_net/dnsmasq.eth1.options6
            dhcp-hostsdir=/data/dnsmasq/hosts
            addn-hosts=/tmp/vintage_net/dnsmasq.eth1.records
            """
@@ -397,14 +376,15 @@ defmodule DnsmasqexTest do
       File.mkdir_p!(tmpdir)
 
       paths =
-        for name <- ~w(hosts options records pid), do: Path.join(tmpdir, "dnsmasq.ioctl0.#{name}")
+        for name <- ~w(hosts options records hosts6 options6 pid),
+            do: Path.join(tmpdir, "dnsmasq.ioctl0.#{name}")
 
       on_exit(fn ->
         PropertyTable.delete_matches(VintageNet, ["interface", "ioctl0"])
         Enum.each(paths ++ Enum.map(paths, &(&1 <> ".new")), &File.rm_rf!/1)
       end)
 
-      [hosts_path, options_path, records_path, _pid_path] = paths
+      [hosts_path, options_path, records_path, _hosts6_path, _options6_path, _pid_path] = paths
       start_server(@config)
 
       %{

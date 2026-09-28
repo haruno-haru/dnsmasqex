@@ -9,7 +9,6 @@ defmodule Dnsmasqex.ConfigIntegrationTest do
   alias VintageNet.Interface.RawConfig
 
   @moduletag :dnsmasq
-  @moduletag :linux
   @moduletag :tmp_dir
 
   for {name, dnsmasq} <- [
@@ -106,18 +105,58 @@ defmodule Dnsmasqex.ConfigIntegrationTest do
 
       {:ok, %{nftset: false}} ->
         assert %ExUnit.AssertionError{message: message} =
-                 catch_error(check_config(dnsmasq, tmp_dir))
+                 assert_raise(ExUnit.AssertionError, fn -> check_config(dnsmasq, tmp_dir) end)
 
         assert message =~ "recompile with HAVE_NFTSET"
     end
   end
 
-  defp check_config(dnsmasq, tmp_dir) do
-    config =
-      Config.normalize(%{
-        ipv4: %{method: :static, address: {192, 168, 24, 1}, prefix_length: 24},
-        dnsmasq: dnsmasq
+  for {name, dnsmasq} <- [
+        {"stateful",
+         %{
+           dhcpv6: %{start: "fd12:3456:789a:1::10", end: "fd12:3456:789a:1::99", lease_time: 3600},
+           enable_ra: true
+         }},
+        {"SLAAC and DHCPv6",
+         %{dhcpv6: %{start: "fd12:3456:789a:1::10", end: "fd12:3456:789a:1::99", mode: :slaac}}},
+        {"RA only", %{dhcpv6: %{mode: :ra_only}, ra_lifetime: 0}},
+        {"stateless",
+         %{
+           dhcpv6: %{mode: :stateless},
+           options6: %{dns: ["::"], search: ["lan"], ntp: ["fd12:3456:789a:1::1"]}
+         }},
+        {"reservations",
+         %{
+           static_leases6: [
+             %{
+               duid: "00:03:00:01:aa:bb:cc:dd:ee:ff",
+               ip: "fd12:3456:789a:1::100",
+               hostname: "esp32",
+               lease_time: 3600
+             }
+           ],
+           enable_ra: true
+         }},
+        {"raw options",
+         %{dhcpv6: %{mode: :stateless}, options6: %{32 => "600", dns: [], search: []}}}
+      ] do
+    @dnsmasq6 dnsmasq
+
+    test "dnsmasq accepts IPv6 #{name}", %{tmp_dir: tmp_dir} do
+      check_config(@dnsmasq6, tmp_dir, %{
+        ipv4: %{method: :disabled},
+        ipv6: %{method: :static, address: "fd12:3456:789a:1::1", prefix_length: 64}
       })
+    end
+  end
+
+  defp check_config(
+         dnsmasq,
+         tmp_dir,
+         interfaces \\ %{ipv4: %{method: :static, address: {192, 168, 24, 1}, prefix_length: 24}}
+       ) do
+    config =
+      Config.normalize(Map.put(interfaces, :dnsmasq, dnsmasq))
 
     raw_config =
       Config.add_config(
@@ -137,7 +176,12 @@ defmodule Dnsmasqex.ConfigIntegrationTest do
     runtime_conf = Path.join(tmp_dir, "runtime.conf")
 
     runtime_directives =
-      for {option, directive} <- [static_leases: "dhcp-host", options: "dhcp-option"],
+      for {option, directive} <- [
+            static_leases: "dhcp-host",
+            options: "dhcp-option",
+            static_leases6: "dhcp-host",
+            options6: "dhcp-option"
+          ],
           {_path, contents} = Config.runtime_file(option, config.dnsmasq, tmp_dir, "eth1"),
           line <- String.split(contents, "\n", trim: true),
           into: "",

@@ -25,6 +25,32 @@ defmodule Dnsmasqex.LeasesTest do
              Leases.parse("900 aa:bb:cc:dd:ee:ff 192.168.24.10 printer *\n", 1000)
   end
 
+  test "reads mixed DHCPv4 and DHCPv6 leases without confusing IAIDs with MAC addresses" do
+    contents = """
+    1500 aa:bb:cc:dd:ee:ff 192.168.24.10 esp32 *
+    duid 00:01:00:01:aa:bb:cc:dd
+    1600 42 fd12:3456:789a:1::10 esp32 00:03:00:01:aa:bb:cc:dd:ee:ff
+    0 T4294967295 fd12:3456:789a:1::20 * 00:03:00:01:aa:bb:cc:dd:ee:01
+    vendorclass fd12:3456:789a:1::10 00:01
+    1600 invalid fd12:3456:789a:1::30 * 00:03:00:01:aa:bb:cc:dd:ee:02
+    1600 4294967296 fd12:3456:789a:1::30 * 00:03:00:01:aa:bb:cc:dd:ee:02
+    1600 TT42 fd12:3456:789a:1::30 * 00:03:00:01:aa:bb:cc:dd:ee:02
+    1600 +42 fd12:3456:789a:1::30 * 00:03:00:01:aa:bb:cc:dd:ee:02
+    1600 42 not-an-address * *
+    """
+
+    assert [
+             %{lease_mac: "aa:bb:cc:dd:ee:ff", leasetime: 500},
+             %{
+               lease_mac: nil,
+               lease_iaid: "42",
+               lease_duid: "00:03:00:01:aa:bb:cc:dd:ee:ff",
+               leasetime: 600
+             },
+             %{lease_mac: nil, lease_iaid: "T4294967295", hostname: "", leasetime: :infinity}
+           ] = Leases.parse(contents, 1000)
+  end
+
   @tag :tmp_dir
   test "publishes an empty lease file and clears unreadable leases", %{tmp_dir: tmp_dir} do
     ifname = "dnsmasq_lease0"

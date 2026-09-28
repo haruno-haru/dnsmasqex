@@ -4,16 +4,37 @@
 #
 defmodule Dnsmasqex.Config do
   @moduledoc """
-  dnsmasq options for a static IPv4 interface
+  dnsmasq options for static IPv4, IPv6 and dual-stack interfaces
 
-  * `:start` and `:end` - DHCP address range on the interface's subnet. Without
+  Set the top-level `:ipv6` to `%{method: :static, address: ip, prefix_length: 64}`
+  to have Dnsmasqex configure an IPv6 address. The wrapped technology manages
+  the link and `:ipv4`. Use `ipv4: %{method: :disabled}` for IPv6 only.
+
+  * `:start` and `:end` - DHCPv4 address range on the interface's subnet. Without
     them, only static leases get addresses, or only DNS runs if there are none
   * `:lease_time` - seconds, from 120 to 4_294_967_294, or `:infinite`
+  * `:dhcpv6` - a map with `:mode` and optional `:lease_time`. `:stateful`
+    (default) and `:slaac` require IPv6 `:start` and `:end` addresses. `:static`
+    allocates only reservations, `:stateless` provides SLAAC and DHCPv6 options,
+    and `:ra_only` provides SLAAC without DHCPv6; these take no pool. DHCPv6
+    requires an interface prefix of 64..128; advertisements require /64
+  * `:enable_ra` - enable router advertisements for stateful DHCPv6. Defaults
+    to `false`; `:slaac`, `:stateless` and `:ra_only` enable them implicitly
+  * `:ra_lifetime` - advertised default-router lifetime, 0 or 600..9000 seconds.
+    Use 0 for a local network without a gateway; omitted uses dnsmasq's default.
+    Routing and kernel IPv6 forwarding must be configured separately
+  * `:static_leases6` - maps with `:duid`, IPv6 `:ip` and optional `:hostname`
+    and `:lease_time`. DUIDs and IPs must be unique. Defaults to infinite leases
+    and implies `dhcpv6: %{mode: :static}` when no mode is configured
+  * `:options6` - DHCPv6 options: `:dns` and `:ntp` IPv6 lists, `:search` domain
+    lists, or integer option numbers with raw dnsmasq string values. Raw IPv6
+    addresses need brackets. Raw payload types and lengths aren't validated
   * `:static_leases` - `{mac, ip}` or `{mac, ip, hostname}` tuples with
     infinite leases, or maps with a `:mac` and any of `:ip`, `:hostname` and
     `:lease_time`. A map lease with an `:ip` is infinite unless it has a
     `:lease_time`, and `%{mac: mac, ignore: true}` never answers that client
-  * `:records` - `{name, ip}` pairs for exactly those names, like `:dnsd`
+  * `:records` - `{name, ip}` pairs for exactly those names, like `:dnsd`.
+    IPv4 and IPv6 addresses produce A and AAAA records respectively
   * `:domain_records` - `{domain, ip}` pairs that also answer every subdomain.
     The domain may use dnsmasq's patterns, such as `"*.example.com"` for only
     the subdomains, or be `"#"` for every name not found elsewhere
@@ -62,25 +83,44 @@ defmodule Dnsmasqex.Config do
   """
 
   alias Dnsmasqex.Daemon
+  alias Dnsmasqex.IPv6
   alias Dnsmasqex.Notifications
   alias Dnsmasqex.Server
   alias VintageNet.Command
   alias VintageNet.Interface.RawConfig
   alias VintageNet.IP
 
-  @runtime_options [:static_leases, :options, :records]
+  @runtime_options [:static_leases, :options, :records, :static_leases6, :options6]
 
   @typedoc false
-  @type runtime_option :: :static_leases | :options | :records
+  @type runtime_option :: :static_leases | :options | :records | :static_leases6 | :options6
 
   @doc """
   Normalize the `:dnsmasq` options
   """
   @spec normalize(map()) :: map()
-  def normalize(%{ipv4: %{method: :static} = ipv4, dnsmasq: dnsmasq} = config)
-      when is_map(dnsmasq) do
+  def normalize(config), do: config |> IPv6.normalize() |> normalize_dnsmasq()
+
+  defp normalize_dnsmasq(%{dnsmasq: dnsmasq} = config) when is_map(dnsmasq) do
+    ipv4 = static_ipv4(config)
+    ipv6 = IPv6.interface(config)
+
+    if ipv4 || ipv6 do
+      normalize_dnsmasq(config, dnsmasq, ipv4, ipv6)
+    else
+      _ = IPv6.normalize_dnsmasq(dnsmasq, nil)
+      Map.delete(config, :dnsmasq)
+    end
+  end
+
+  defp normalize_dnsmasq(%{dnsmasq: dnsmasq}),
+    do: raise(ArgumentError, "Expected a map for :dnsmasq, got: #{inspect(dnsmasq)}")
+
+  defp normalize_dnsmasq(config), do: config
+
+  defp normalize_dnsmasq(config, dnsmasq, ipv4, ipv6) do
     check_no_busybox_servers(config)
-    check_ipv4(ipv4)
+    if ipv4, do: check_ipv4(ipv4)
 
     new_dnsmasq =
       dnsmasq
@@ -97,6 +137,11 @@ defmodule Dnsmasqex.Config do
         :mx_records,
         :nftsets,
         :options,
+        :dhcpv6,
+        :enable_ra,
+        :ra_lifetime,
+        :static_leases6,
+        :options6,
         :name_servers,
         :forward_domains,
         :domain,
@@ -122,15 +167,13 @@ defmodule Dnsmasqex.Config do
       |> normalize_name_servers()
       |> update_list(:forward_domains, &normalize_forward_domain/1)
       |> normalize_domain()
+      |> IPv6.normalize_dnsmasq(ipv6)
 
     %{config | dnsmasq: new_dnsmasq}
   end
 
-  def normalize(%{ipv4: %{method: :static}, dnsmasq: dnsmasq}),
-    do: raise(ArgumentError, "Expected a map for :dnsmasq, got: #{inspect(dnsmasq)}")
-
-  def normalize(%{dnsmasq: _not_static} = config), do: Map.drop(config, [:dnsmasq])
-  def normalize(config), do: config
+  defp static_ipv4(%{ipv4: %{method: :static} = ipv4}), do: ipv4
+  defp static_ipv4(_config), do: nil
 
   @doc false
   @spec normalize_value(map(), runtime_option(), term()) :: term()
@@ -156,6 +199,7 @@ defmodule Dnsmasqex.Config do
     do: raise(ArgumentError, "Invalid static IPv4 configuration #{inspect(ipv4)}")
 
   defp normalize_range(%{start: first, end: last} = dnsmasq, ipv4) do
+    require_ipv4!(ipv4)
     first = subnet_ip!(first, ipv4)
     last = subnet_ip!(last, ipv4)
 
@@ -211,6 +255,7 @@ defmodule Dnsmasqex.Config do
   defp check_authoritative(dnsmasq), do: dnsmasq
 
   defp normalize_leases(leases, ipv4) when is_list(leases) do
+    if leases != [], do: require_ipv4!(ipv4)
     leases = Enum.map(leases, &normalize_lease(&1, ipv4))
 
     if length(Enum.uniq_by(leases, &lease_mac/1)) != length(leases) do
@@ -309,6 +354,10 @@ defmodule Dnsmasqex.Config do
   end
 
   defp check_hostname(hostname), do: raise(ArgumentError, "Invalid hostname #{inspect(hostname)}")
+
+  @doc false
+  @spec hostname!(String.t()) :: String.t()
+  def hostname!(hostname), do: check_hostname(hostname)
 
   defp update_list(dnsmasq, key, fun) do
     Map.update(dnsmasq, key, [], fn
@@ -468,6 +517,7 @@ defmodule Dnsmasqex.Config do
   @list_options [:search | @ip_list_options]
 
   defp normalize_options(options, ipv4) when is_map(options) do
+    if options != %{}, do: require_ipv4!(ipv4)
     options = Map.new(options, &normalize_option(&1, ipv4))
 
     Enum.each(options, fn {key, _value} = option ->
@@ -613,7 +663,9 @@ defmodule Dnsmasqex.Config do
     string
   end
 
-  defp dns_name!(name) do
+  @doc false
+  @spec dns_name!(String.t()) :: String.t()
+  def dns_name!(name) do
     if dns_name?(name), do: name, else: raise(ArgumentError, "Invalid DNS name #{inspect(name)}")
   end
 
@@ -645,22 +697,31 @@ defmodule Dnsmasqex.Config do
     end
   end
 
+  defp require_ipv4!(nil),
+    do: raise(ArgumentError, "DHCPv4 requires a static :ipv4 interface; use :dhcpv6 for IPv6")
+
+  defp require_ipv4!(_ipv4), do: :ok
+
   @doc """
   Add the dnsmasq configuration file and daemon
   """
   @spec add_config(RawConfig.t(), map(), keyword()) :: RawConfig.t()
-  def add_config(
-        %RawConfig{ifname: ifname} = raw_config,
-        %{ipv4: %{method: :static} = ipv4, dnsmasq: dnsmasq},
-        opts
-      ) do
+  def add_config(raw_config, config, opts),
+    do: raw_config |> IPv6.add_config(config) |> add_dnsmasq(config, opts)
+
+  defp add_dnsmasq(
+         %RawConfig{ifname: ifname} = raw_config,
+         %{dnsmasq: dnsmasq} = config,
+         opts
+       ) do
+    ipv4 = static_ipv4(config)
+    ipv6 = IPv6.interface(config)
     tmpdir = Keyword.fetch!(opts, :tmpdir)
     notify_name = "dnsmasqex_#{ifname}"
 
     context = %{
       ifname: ifname,
-      address: ipv4.address,
-      prefix_length: ipv4.prefix_length,
+      subnets: Enum.reject([ipv4, ipv6], &is_nil/1),
       lease_path: lease_path(dnsmasq, tmpdir, ifname)
     }
 
@@ -673,7 +734,7 @@ defmodule Dnsmasqex.Config do
     notifier = Supervisor.child_spec({BEAMNotify, notifier_options}, id: :dnsmasq_notify)
 
     server =
-      {Server, ifname: ifname, tmpdir: tmpdir, config: %{ipv4: ipv4, dnsmasq: dnsmasq}}
+      {Server, ifname: ifname, tmpdir: tmpdir, config: Map.take(config, [:ipv4, :ipv6, :dnsmasq])}
 
     daemon =
       Supervisor.child_spec(
@@ -694,7 +755,7 @@ defmodule Dnsmasqex.Config do
       raw_config
       | files:
           [
-            {conf_path(tmpdir, ifname), dnsmasq_contents(dnsmasq, ifname, ipv4, tmpdir)}
+            {conf_path(tmpdir, ifname), dnsmasq_contents(dnsmasq, ifname, ipv4, ipv6, tmpdir)}
             | Enum.map(@runtime_options, &runtime_file(&1, dnsmasq, tmpdir, ifname))
           ] ++ raw_config.files,
         cleanup_files:
@@ -708,7 +769,7 @@ defmodule Dnsmasqex.Config do
     }
   end
 
-  def add_config(raw_config, _config_without_dnsmasq, _opts), do: raw_config
+  defp add_dnsmasq(raw_config, _config_without_dnsmasq, _opts), do: raw_config
 
   # dnsmasq only watches a hosts directory that exists when it starts
   defp mkdir_cmds(dnsmasq) do
@@ -717,12 +778,16 @@ defmodule Dnsmasqex.Config do
     |> Enum.map(&{:fun, File, :mkdir_p, [&1]})
   end
 
-  defp dnsmasq_contents(dnsmasq, ifname, ipv4, tmpdir) do
+  defp dnsmasq_contents(dnsmasq, ifname, ipv4, ipv6, tmpdir) do
     [
       "interface=#{ifname}",
       "except-interface=lo",
-      "listen-address=#{IP.ip_to_string(ipv4.address)}",
-      "bind-interfaces",
+      for(
+        subnet <- [ipv4, ipv6],
+        subnet,
+        do: "listen-address=#{IP.ip_to_string(subnet.address)}"
+      ),
+      if(ipv6, do: "bind-dynamic", else: "bind-interfaces"),
       "no-hosts",
       upstream(dnsmasq),
       local_domain(dnsmasq),
@@ -734,8 +799,11 @@ defmodule Dnsmasqex.Config do
       "script-on-renewal",
       authoritative(dnsmasq),
       dhcp_range(dnsmasq, ipv4),
+      IPv6.config_lines(dnsmasq, ipv6, ifname),
       "dhcp-hostsfile=#{runtime_path(:static_leases, tmpdir, ifname)}",
       "dhcp-optsfile=#{runtime_path(:options, tmpdir, ifname)}",
+      "dhcp-hostsfile=#{runtime_path(:static_leases6, tmpdir, ifname)}",
+      "dhcp-optsfile=#{runtime_path(:options6, tmpdir, ifname)}",
       hosts_dir(dnsmasq),
       "addn-hosts=#{runtime_path(:records, tmpdir, ifname)}",
       Enum.map(dnsmasq.domain_records, fn {name, ip} ->
@@ -779,7 +847,7 @@ defmodule Dnsmasqex.Config do
   end
 
   defp dhcp_range(dnsmasq, ipv4) do
-    if dhcp_enabled?(dnsmasq), do: static_range(dnsmasq, ipv4), else: []
+    if ipv4 && dhcp_enabled?(dnsmasq), do: static_range(dnsmasq, ipv4), else: []
   end
 
   @doc false
@@ -816,6 +884,8 @@ defmodule Dnsmasqex.Config do
     do: {runtime_path(key, tmpdir, ifname), runtime_contents(key, Map.fetch!(dnsmasq, key))}
 
   defp runtime_contents(:static_leases, leases), do: Enum.map_join(leases, &host_line/1)
+  defp runtime_contents(:static_leases6, leases), do: IPv6.hosts_contents(leases)
+  defp runtime_contents(:options6, options), do: IPv6.options_contents(options)
 
   defp runtime_contents(:records, records),
     do: Enum.map_join(records, fn {name, ip} -> "#{IP.ip_to_string(ip)} #{name}\n" end)
@@ -890,6 +960,11 @@ defmodule Dnsmasqex.Config do
 
   def runtime_path(:options, tmpdir, ifname), do: Path.join(tmpdir, "dnsmasq.#{ifname}.options")
   def runtime_path(:records, tmpdir, ifname), do: Path.join(tmpdir, "dnsmasq.#{ifname}.records")
+
+  def runtime_path(:static_leases6, tmpdir, ifname),
+    do: Path.join(tmpdir, "dnsmasq.#{ifname}.hosts6")
+
+  def runtime_path(:options6, tmpdir, ifname), do: Path.join(tmpdir, "dnsmasq.#{ifname}.options6")
 
   defp lease_path(%{lease_path: path}, _tmpdir, _ifname), do: path
   defp lease_path(_dnsmasq, tmpdir, ifname), do: Path.join(tmpdir, "dnsmasq.#{ifname}.leases")
