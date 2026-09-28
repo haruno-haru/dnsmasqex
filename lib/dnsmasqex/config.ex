@@ -49,7 +49,7 @@ defmodule Dnsmasqex.Config do
     `6#` to take only that family. Domains include their subdomains; `"#"`
     matches all domains. Wildcards aren't supported. The tables and sets must
     already exist and their names must be valid unquoted nftables identifiers.
-    Needs `nftset` in
+    Reserved words such as `set` and `counter` aren't checked. Needs `nftset` in
     `Dnsmasqex.capabilities/0` and `Dnsmasqex.nftables_available?/0`
   * `:authoritative` - `true` when dnsmasq is the only DHCP server on the
     network, so clients with leases it doesn't know get addresses right away
@@ -422,18 +422,47 @@ defmodule Dnsmasqex.Config do
   defp nftset_domain!(domain),
     do: raise(ArgumentError, "Invalid dnsmasq nftset domain #{inspect(domain)}")
 
-  # nft reads the names unquoted, so they must start with a letter, "_" or "."
   defp nftset!(set) when is_binary(set) do
-    name = "[[:alpha:]_.][[:alnum:]_.-]{0,254}"
+    pattern =
+      ~r/\A(?:[46]#)?(?:(?:ip|ip6|inet|arp|bridge|netdev)#)?([[:alnum:]_.-]{1,255})#([[:alnum:]_.-]{1,255})\z/
 
-    if set =~ ~r/\A([46]#)?((ip|ip6|inet|arp|bridge|netdev)#)?#{name}##{name}\z/ do
+    with [table, name] <- Regex.run(pattern, set, capture: :all_but_first),
+         true <- nft_name?(table) and nft_name?(name) do
       set
     else
-      raise ArgumentError, "Invalid nftables set #{inspect(set)}"
+      _ -> raise ArgumentError, "Invalid nftables set #{inspect(set)}"
     end
   end
 
   defp nftset!(set), do: raise(ArgumentError, "Invalid nftables set #{inspect(set)}")
+
+  defp nft_name?("."), do: false
+
+  defp nft_name?(name) do
+    name =~ ~r/\A[[:alpha:]_.][[:alnum:]_.-]*\z/ or
+      name =~ ~r/\A(?:[0-9]{1,3}\.){3}[0-9]{1,3}\z/ or
+      name =~ ~r/\A(?:[0-9]+d)?(?:[0-9]+h)?(?:[0-9]+m)?(?:[0-9]+s)?(?:[0-9]+ms)?\z/ or
+      nft_number_name?(name)
+  end
+
+  # nft treats invalid octal and overflowing integers as names instead of numbers.
+  defp nft_number_name?(name) do
+    if name =~ ~r/\A(?:[0-9]+|0[xX][[:xdigit:]]+)\z/ do
+      {digits, base} =
+        case name do
+          <<"0", marker, rest::binary>> when marker in [?x, ?X] -> {rest, 16}
+          <<"0", _rest::binary>> -> {name, 8}
+          _ -> {name, 10}
+        end
+
+      case Integer.parse(digits, base) do
+        {number, ""} -> number > 0xFFFFFFFFFFFFFFFF
+        _ -> true
+      end
+    else
+      false
+    end
+  end
 
   @ip_list_options [:dns, :router, :ntp]
   @list_options [:search | @ip_list_options]

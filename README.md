@@ -258,7 +258,9 @@ false
 ```
 
 `:nftsets` needs both. Its nftables tables and sets must already exist, with
-names that nftables accepts without quotes.
+names that nftables accepts without quotes. Avoid reserved words such as
+`set` and `counter`; keyword restrictions depend on the installed nftables
+version and aren't checked here.
 `VintageNet.verify_system/0` checks that dnsmasq can serve DHCP and run the
 script that reports events.
 

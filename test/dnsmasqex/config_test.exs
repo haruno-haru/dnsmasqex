@@ -285,6 +285,44 @@ defmodule Dnsmasqex.ConfigTest do
     end
   end
 
+  test "distinguishes nftables names from numeric and punctuation tokens" do
+    for name <- [
+          ".allowed",
+          "_allowed",
+          "..",
+          "1h2m3s4ms",
+          "192.0.2.1",
+          "999.999.999.999",
+          "09",
+          "18446744073709551616",
+          "02000000000000000000000",
+          "0x10000000000000000"
+        ] do
+      target = "inet##{name}##{name}"
+
+      assert %{dnsmasq: %{nftsets: [{["example.com"], [^target]}]}} =
+               Config.normalize(%{@config | dnsmasq: %{nftsets: [{"example.com", target}]}})
+    end
+
+    for name <- [
+          ".",
+          "1allowed",
+          "-filter",
+          "1m2h",
+          "010",
+          "18446744073709551615",
+          "01777777777777777777777",
+          "0xffffffffffffffff"
+        ] do
+      assert_raise ArgumentError, fn ->
+        Config.normalize(%{
+          @config
+          | dnsmasq: %{nftsets: [{"example.com", "inet#filter##{name}"}]}
+        })
+      end
+    end
+  end
+
   describe "options" do
     defp options(options),
       do: Config.normalize(%{@config | dnsmasq: %{options: options}}).dnsmasq.options
