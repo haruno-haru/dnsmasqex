@@ -24,21 +24,25 @@ defmodule Dnsmasqex.NetworkIntegrationTest do
     assert {:unix, :linux} == :os.type()
     assert {"0\n", 0} == System.cmd("id", ["-u"])
     assert File.read_link!("/proc/self/ns/net") != File.read_link!("/proc/1/ns/net")
+    %{namespace: create_network(@ifname, "192.0.2.2")}
+  end
+
+  defp create_network(ifname, client_address) do
     namespace = "dnsmasqex-#{System.unique_integer([:positive])}"
     ip(["netns", "add", namespace])
 
     on_exit(fn ->
       System.cmd("ip", ["netns", "del", namespace], stderr_to_stdout: true)
-      System.cmd("ip", ["link", "del", @ifname], stderr_to_stdout: true)
-      Notifications.clear(@ifname)
+      System.cmd("ip", ["link", "del", ifname], stderr_to_stdout: true)
+      Notifications.clear(ifname)
     end)
 
     ip(["link", "set", "lo", "up"])
-    ip(["link", "add", @ifname, "type", "veth", "peer", "name", @client])
+    ip(["link", "add", ifname, "type", "veth", "peer", "name", @client])
     ip(["link", "set", @client, "netns", namespace])
 
     for {prefix, device, mac, address} <- [
-          {[], @ifname, "02:00:00:00:00:01", "fe80::1/64"},
+          {[], ifname, "02:00:00:00:00:01", "fe80::1/64"},
           {["-n", namespace], @client, "02:00:00:00:00:02", "fe80::2/64"}
         ] do
       ip(prefix ++ ["link", "set", device, "address", mac, "addrgenmode", "none"])
@@ -46,8 +50,8 @@ defmodule Dnsmasqex.NetworkIntegrationTest do
       ip(prefix ++ ["-6", "addr", "add", address, "dev", device, "nodad"])
     end
 
-    ip(["-n", namespace, "addr", "add", "192.0.2.2/24", "dev", @client])
-    %{namespace: namespace}
+    ip(["-n", namespace, "addr", "add", "#{client_address}/24", "dev", @client])
+    namespace
   end
 
   test "allocates, renews, rebinds and releases both families with live option updates",
@@ -298,7 +302,78 @@ defmodule Dnsmasqex.NetworkIntegrationTest do
     assert client(context, ["prefixes", "fd12:3456:789a:1::,fd56::"]) == ""
   end
 
+  test "isolates leases, notifications and record updates across simultaneous interfaces",
+       context do
+    start_server(context, :stateful)
+
+    second =
+      Map.merge(context, %{
+        namespace: create_network("dnssrv1", "192.0.3.2"),
+        ifname: "dnssrv1",
+        server4: "192.0.3.1",
+        server6: "fd34::1",
+        ipv6: %{method: :static, address: "fd34::1", prefix_length: 64}
+      })
+
+    start_server(second, :stateful, %{
+      start: "192.0.3.100",
+      end: "192.0.3.110",
+      options: %{dns: ["192.0.3.1"]},
+      options6: %{dns: ["fd34::1"], search: ["lan"]},
+      dhcpv6: %{start: "fd34::100", end: "fd34::110", lease_time: 600}
+    })
+
+    second_event = ["interface", "dnssrv1", "dnsmasq", "event"]
+    VintageNet.subscribe(second_event)
+
+    [address4, address6] =
+      context |> client(["acquire", state_path(context), "192.0.2.1"]) |> String.split()
+
+    [second4, second6] =
+      second |> client(["acquire", state_path(second), "192.0.3.1", "fd34::1"]) |> String.split()
+
+    second_leases = ["interface", "dnssrv1", "dhcpd", "leases"]
+    eventually(fn -> length(leases()) == 2 and length(VintageNet.get(second_leases, [])) == 2 end)
+    assert Enum.sort(Enum.map(leases(), & &1.lease_nip)) == Enum.sort([address4, address6])
+
+    assert Enum.sort(Enum.map(VintageNet.get(second_leases), & &1.lease_nip)) ==
+             Enum.sort([second4, second6])
+
+    assert_receive {VintageNet, ^second_event, _,
+                    %Event{name: "add", interface: "dnssrv1", ip: ^second6}, _},
+                   3000
+
+    assert :ok = Server.update(@ifname, :add_record, [{"first-only.lan", "192.0.2.123"}])
+    eventually(fn -> resolve("first-only.lan", :a) == [{192, 0, 2, 123}] end)
+
+    assert :inet_res.lookup(
+             ~c"first-only.lan",
+             :in,
+             :a,
+             [nameservers: [{{192, 0, 3, 1}, 53}]],
+             1000
+           ) == []
+
+    assert client(context, ["release", state_path(context), "192.0.2.1"]) == ""
+    eventually(fn -> leases() == [] end)
+    assert length(VintageNet.get(second_leases)) == 2
+  end
+
+  test "serves the same leases after the interface goes down and returns", context do
+    start_server(context, :stateful)
+    addresses = client(context, ["acquire", state_path(context), "192.0.2.1"])
+    [address4, _] = String.split(addresses)
+    ip(["-n", context.namespace, "addr", "add", "#{address4}/24", "dev", @client])
+    ip(["link", "set", @ifname, "down"])
+    ip(["link", "set", @ifname, "up"])
+    ip(["-6", "addr", "replace", "fe80::1/64", "dev", @ifname, "nodad"])
+    assert client(context, ["renew", state_path(context), "192.0.2.1"]) == addresses
+  end
+
   defp start_server(context, mode, extra \\ %{}) do
+    ifname = Map.get(context, :ifname, @ifname)
+    server4 = Map.get(context, :server4, "192.0.2.1")
+
     range =
       if mode in [:stateful, :slaac],
         do: %{start: "fd12:3456:789a:1::100", end: "fd12:3456:789a:1::110"},
@@ -314,7 +389,7 @@ defmodule Dnsmasqex.NetworkIntegrationTest do
 
     config =
       %{
-        ipv4: %{method: :static, address: {192, 0, 2, 1}, prefix_length: 24},
+        ipv4: %{method: :static, address: server4, prefix_length: 24},
         ipv6:
           Map.get(context, :ipv6, %{
             method: :static,
@@ -347,11 +422,11 @@ defmodule Dnsmasqex.NetworkIntegrationTest do
     raw =
       Config.add_config(
         %RawConfig{
-          ifname: @ifname,
+          ifname: ifname,
           type: Dnsmasqex,
           source_config: config,
-          required_ifnames: [@ifname],
-          up_cmds: [{:run, "ip", ["addr", "add", "192.0.2.1/24", "dev", @ifname]}]
+          required_ifnames: [ifname],
+          up_cmds: [{:run, "ip", ["addr", "add", "#{server4}/24", "dev", ifname]}]
         },
         config,
         tmpdir: context.tmp_dir,
@@ -362,18 +437,18 @@ defmodule Dnsmasqex.NetworkIntegrationTest do
     Enum.each(raw.up_cmds, &run_command/1)
 
     eventually(fn ->
-      {output, 0} = System.cmd("ip", ["-6", "addr", "show", "dev", @ifname, "tentative"])
+      {output, 0} = System.cmd("ip", ["-6", "addr", "show", "dev", ifname, "tentative"])
       output == ""
     end)
 
     supervisor =
       start_supervised!(%{
-        id: :interface,
+        id: {:interface, ifname},
         start: {Supervisor, :start_link, [raw.child_specs, [strategy: :one_for_one]]}
       })
 
     eventually(fn ->
-      match?(%{state: :running}, VintageNet.get(["interface", @ifname, "dnsmasq", "status"]))
+      match?(%{state: :running}, VintageNet.get(["interface", ifname, "dnsmasq", "status"]))
     end)
 
     %{supervisor: supervisor, config: config, raw: raw}
@@ -387,7 +462,10 @@ defmodule Dnsmasqex.NetworkIntegrationTest do
   defp run_command({:fun, module, function, args}), do: apply(module, function, args)
 
   defp ip(args), do: run_command({:run, "ip", args})
-  defp state_path(context), do: Path.join(context.tmp_dir, "client.json")
+
+  defp state_path(context),
+    do: Path.join(context.tmp_dir, "client-#{Map.get(context, :ifname, @ifname)}.json")
+
   defp leases(), do: VintageNet.get(["interface", @ifname, "dhcpd", "leases"], [])
 
   defp client(context, args) do
@@ -401,7 +479,11 @@ defmodule Dnsmasqex.NetworkIntegrationTest do
           "python3",
           Path.expand("../support/network_client.py", __DIR__) | args
         ],
-        stderr_to_stdout: true
+        stderr_to_stdout: true,
+        env: [
+          {"DNSMASQEX_SERVER4", Map.get(context, :server4, "192.0.2.1")},
+          {"DNSMASQEX_SERVER6", Map.get(context, :server6, "fd12:3456:789a:1::1")}
+        ]
       )
 
     assert status == 0, output

@@ -648,6 +648,7 @@ They create a separate client namespace connected by a virtual Ethernet pair,
 use the generated configuration and supervised processes, and verify DHCPv4
 and DHCPv6 allocation, renewal, release, decline, pool exhaustion, client-ID
 policies, forced options, lease persistence and server DUID stability. They also
+verify isolation between simultaneous interfaces and recovery after link loss,
 exercise DHCPv6 Confirm, Rapid Commit and temporary addresses, external hosts
 directory updates, TFTP transfers, nftables insertion, custom resolver files,
 scoped upstream forwarding and RA flags, MTU, priority and prefix renumbering.

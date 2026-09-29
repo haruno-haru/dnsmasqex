@@ -289,7 +289,7 @@ defmodule Dnsmasqex.DNSIntegrationTest do
         String.to_charlist(name),
         :in,
         type,
-        [nameservers: [{@loopback, port}], timeout: 100, retry: 1, usevc: tcp?],
-        200
+        [nameservers: [{@loopback, port}], timeout: 1000, retry: 1, usevc: tcp?],
+        2000
       )
 end

@@ -15,8 +15,8 @@ import threading
 IFACE = "dnscli0"
 MAC = bytes.fromhex("020000000002")
 DUID = b"\x00\x03\x00\x01" + MAC
-SERVER4 = "192.0.2.1"
-SERVER6 = "fd12:3456:789a:1::1"
+SERVER4 = os.environ.get("DNSMASQEX_SERVER4", "192.0.2.1")
+SERVER6 = os.environ.get("DNSMASQEX_SERVER6", "fd12:3456:789a:1::1")
 SEARCH = b"\x03lan\x00"
 
 
@@ -149,8 +149,8 @@ def lease(action, path, dns4, dns6):
         offer6 = dhcp6(1)
         reply6 = dhcp6(3, offer6[2], address6(offer6))
         addr6 = address6(reply6)
-        assert ipaddress.ip_address(addr4) in ipaddress.ip_network("192.0.2.0/24")
-        assert ipaddress.ip_address(addr6) in ipaddress.ip_network("fd12:3456:789a:1::/64")
+        assert ipaddress.ip_address(addr4) in ipaddress.ip_network(SERVER4 + "/24", strict=False)
+        assert ipaddress.ip_address(addr6) in ipaddress.ip_network(SERVER6 + "/64", strict=False)
         state = {"ipv4": addr4, "ipv6": addr6, "server": reply6[2].hex()}
         with open(path, "w", encoding="utf-8") as file:
             json.dump(state, file)

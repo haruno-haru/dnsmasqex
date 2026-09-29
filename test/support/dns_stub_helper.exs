@@ -77,6 +77,18 @@ defmodule Dnsmasqex.Test.DNSStub do
         tc: truncated?
       )
 
-    :inet_dns.encode(:inet_dns.make_msg(header: header, qdlist: questions, anlist: answers))
+    response =
+      :inet_dns.encode(:inet_dns.make_msg(header: header, qdlist: questions, anlist: answers))
+
+    # Some OTP decoders lowercase names. Echo the original wire question so
+    # dnsmasq's randomized-case check sees the exact question it sent.
+    question_size = question_size(binary_part(query, 12, byte_size(query) - 12), 0)
+    <<header::binary-size(12), _::binary-size(question_size), rest::binary>> = response
+    header <> binary_part(query, 12, question_size) <> rest
   end
+
+  defp question_size(<<0, _::binary>>, size), do: size + 5
+
+  defp question_size(<<length, _label::binary-size(length), rest::binary>>, size),
+    do: question_size(rest, size + length + 1)
 end
