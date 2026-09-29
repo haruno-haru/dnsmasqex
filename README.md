@@ -487,8 +487,8 @@ The packet tests require Linux, root, `iproute2`, Python 3 and dnsmasq. Run
 them in a fresh network namespace after `mix deps.get` and `mix test`:
 
 ```sh
-sudo env "PATH=$PATH" "MIX_HOME=$HOME/.mix" "HEX_HOME=$HOME/.hex" DNSMASQEX_NETWORK_TESTS=1 \
-  unshare --net mix test test/dnsmasqex/network_integration_test.exs --trace
+sudo env "PATH=$PATH" "MIX_HOME=$HOME/.mix" "HEX_HOME=$HOME/.hex" MIX_ENV=test DNSMASQEX_NETWORK_TESTS=1 \
+  unshare --net mix test test/dnsmasqex/network_integration_test.exs --no-compile --no-deps-check --trace
 ```
 
 They create a separate client namespace connected by a virtual Ethernet pair,
