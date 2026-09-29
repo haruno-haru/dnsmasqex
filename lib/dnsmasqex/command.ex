@@ -5,9 +5,6 @@
 defmodule Dnsmasqex.Command do
   @moduledoc false
 
-  # Probes have small, bounded output. Reading one fixed window avoids writing
-  # flow-control acknowledgments to a short-lived process after it has exited.
-  # The MuonTrap executable still terminates the child when its port closes.
   @output_limit 65_536
 
   @spec run(String.t(), [String.t()], pos_integer()) ::

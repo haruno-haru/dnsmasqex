@@ -134,7 +134,7 @@ defmodule Dnsmasqex.EventTest do
   end
 
   test "malformed addresses aren't interpreted as IPv6 lease identities" do
-    for ip <- ["invalid:address", "192.168.24.999", "fd12:::10"] do
+    for ip <- ["invalid:address", "192.168.24.999", "fd12:::10", <<255>>] do
       assert Event.new(["add", "aa:bb:cc:dd:ee:ff", ip], %{}) == %Event{name: "add"}
     end
   end

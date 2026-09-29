@@ -123,7 +123,10 @@ defmodule Dnsmasqex.AdvancedTest do
           "::1@eth0@eth1",
           "127.0.0.1\nport=0",
           "fe80::1%",
-          "127.0.0.1@"
+          "127.0.0.1@",
+          <<255>>,
+          "192.0.2.1@" <> <<255>>,
+          "fe80::1%" <> <<255>>
         ] do
       assert_raise ArgumentError, fn -> Upstream.normalize(endpoint) end
     end
@@ -152,7 +155,9 @@ defmodule Dnsmasqex.AdvancedTest do
           port: "53",
           max_tcp_connections: 0,
           dhcp_host: "x\ny",
-          server: "x\ry"
+          server: "x\ry",
+          dhcp_range: <<255>>,
+          dhcp_host: <<255>>
         ] do
       assert_raise ArgumentError, fn -> Directives.normalize([{key, value}]) end
     end
@@ -222,6 +227,47 @@ defmodule Dnsmasqex.AdvancedTest do
 
     assert_raise ArgumentError, ~r/interface/, fn ->
       Config.normalize(put_in(config, [:dnsmasq, :listen_mode], :addresses))
+    end
+  end
+
+  @tag :dnsmasq
+  test "native range roles follow the system parser's comments and quoted tags", %{
+    tmp_dir: tmpdir
+  } do
+    for {range, ra?, dhcp4?, dhcp6?} <- [
+          {"fd12::,ra-only # comment", true, false, false},
+          {"fd12::,static # comment", false, false, true},
+          {"fd12::10,fd12::99 # comment", false, false, true},
+          {"fd12::,ra-stateless # comment", true, false, false},
+          {"192.0.2.0,proxy # comment", false, false, false},
+          {~s(192.0.2.0,"proxy" # comment), false, false, false},
+          {~s(192.0.2.0, "proxy"# comment), false, false, false},
+          {~s(fd12::,"r"a-only # comment), true, false, false},
+          {~s(fd12::,sta"t"ic # comment), false, false, true},
+          {"192.0.2.10,192.0.2.99 # comment", false, true, false},
+          {"tag:group#1,fd12::,ra-only # comment", true, false, false},
+          {~s(tag:"group # 1",fd12::,ra-only # comment), true, false, false},
+          {~s(tag:"group,192.0.2.10,proxy",fd12::,ra-only # comment), true, false, false},
+          {~S(tag:"group\" # 1",fd12::,ra-only # "unfinished), true, false, false}
+        ] do
+      assert :ok = Preflight.runtime("dnsmasq", :directives, "dhcp-range=#{range}\n", tmpdir)
+
+      config =
+        Config.normalize(%{
+          ipv4: @base.ipv4,
+          ipv6: %{method: :static, address: "fd12::1", prefix_length: 64},
+          dnsmasq: %{directives: [dhcp_range: range]}
+        })
+
+      assert IPv6.ra_enabled?(config.dnsmasq) == ra?, range
+      assert Config.dhcp_enabled?(config.dnsmasq) == dhcp4?, range
+      assert IPv6.dhcp_enabled?(config.dnsmasq) == dhcp6?, range
+
+      assert config.dnsmasq.listen_mode ==
+               if(ra? or dhcp4? or dhcp6?, do: :interface, else: :addresses),
+             range
+
+      assert Config.normalize(config) == config
     end
   end
 

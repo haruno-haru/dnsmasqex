@@ -322,8 +322,6 @@ defmodule Dnsmasqex.Config do
   defp normalize_listen_mode(dnsmasq) do
     ra? = IPv6.ra_enabled?(dnsmasq)
     dhcp? = dhcp_enabled?(dnsmasq) or IPv6.dhcp_enabled?(dnsmasq)
-    # A single explicit interface lets dnsmasq bind DHCP sockets to that device.
-    # Address-only listeners can lose unicast packets to another DHCP instance.
     mode = Map.get(dnsmasq, :listen_mode, if(ra? or dhcp?, do: :interface, else: :addresses))
 
     if mode not in [:addresses, :interface],
@@ -774,7 +772,8 @@ defmodule Dnsmasqex.Config do
   defp upstream_string(ip), do: IP.ip_to_string(ip)
 
   defp ip!(ip) do
-    with {:ok, address} <- IP.ip_to_tuple(ip),
+    with true <- not is_binary(ip) or String.valid?(ip),
+         {:ok, address} <- IP.ip_to_tuple(ip),
          true <- Enum.all?(Tuple.to_list(address), &is_integer/1) do
       address
     else
@@ -831,13 +830,13 @@ defmodule Dnsmasqex.Config do
   end
 
   defp ipv4!(ip) do
-    case IP.ip_to_tuple(ip) do
-      {:ok, {a, b, c, d} = ip}
-      when is_integer(a) and is_integer(b) and is_integer(c) and is_integer(d) ->
-        ip
-
-      _ ->
-        raise ArgumentError, "Invalid IPv4 address #{inspect(ip)}"
+    with true <- not is_binary(ip) or String.valid?(ip),
+         {:ok, {a, b, c, d} = address}
+         when is_integer(a) and is_integer(b) and is_integer(c) and is_integer(d) <-
+           IP.ip_to_tuple(ip) do
+      address
+    else
+      _ -> raise ArgumentError, "Invalid IPv4 address #{inspect(ip)}"
     end
   end
 

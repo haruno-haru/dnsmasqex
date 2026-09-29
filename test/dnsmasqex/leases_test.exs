@@ -14,6 +14,7 @@ defmodule Dnsmasqex.LeasesTest do
     1000 aa:bb:cc:dd:ee:ff 192.168.24.10 printer
     -1 aa:bb:cc:dd:ee:ff 192.168.24.10 printer *
     1000s aa:bb:cc:dd:ee:ff 192.168.24.10 printer *
+    1000 aa:bb:cc:dd:ee:ff #{<<255>>} printer *
     duid 00:01:00:01:aa:bb:cc:dd
     """
 

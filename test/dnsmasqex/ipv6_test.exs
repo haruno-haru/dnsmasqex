@@ -260,6 +260,58 @@ defmodule Dnsmasqex.IPv6Test do
     end
   end
 
+  test "rejects malformed address encoding at the IPv6 input boundary" do
+    for config <- [
+          put_in(@config, [:ipv6, :address], <<255>>),
+          put_in(@config, [:dnsmasq, :dhcpv6, :start], <<255>>),
+          put_in(@config, [:dnsmasq, :options6], %{dns: [<<255>>]}),
+          put_in(@config, [:dnsmasq, :static_leases6], [%{duid: @duid, ip: <<255>>}])
+        ] do
+      assert_raise ArgumentError, ~r/Invalid IPv6 address/, fn ->
+        Dnsmasqex.normalize(config)
+      end
+    end
+  end
+
+  test "generated DHCPv6 pools reject reservations on additional prefixes" do
+    config = %{
+      ipv6: %{
+        method: :static,
+        address: "fd12::1",
+        prefix_length: 64,
+        addresses: [%{address: "fd34::1", prefix_length: 64}]
+      },
+      dnsmasq: %{static_leases6: [%{duid: @duid, ip: "fd34::100"}]}
+    }
+
+    for dnsmasq <- [config.dnsmasq, Map.put(config.dnsmasq, :dhcpv6, %{mode: :static})] do
+      assert_raise ArgumentError, ~r/reservations.*primary prefix/, fn ->
+        Config.normalize(%{config | dnsmasq: dnsmasq})
+      end
+    end
+
+    native =
+      put_in(config, [:dnsmasq, :directives],
+        dhcp_range: "fd12::,static,64",
+        dhcp_range: "fd34::,static,64"
+      )
+
+    normalized = Config.normalize(native)
+    assert [%{ip: {0xFD34, 0, 0, 0, 0, 0, 0, 0x100}}] = normalized.dnsmasq.static_leases6
+    assert Config.normalize(normalized) == normalized
+  end
+
+  test "DHCPv6 pools exclude every server address, including addresses inside the range" do
+    config =
+      put_in(@config, [:ipv6, :addresses], [
+        %{address: "fd12:3456:789a:1::50", prefix_length: 64}
+      ])
+
+    assert_raise ArgumentError, ~r/exclude.*interface/, fn ->
+      Dnsmasqex.normalize(config)
+    end
+  end
+
   @tag :dnsmasq
   test "changes IPv6 reservations and options without disturbing IPv4", %{tmp_dir: tmpdir} do
     ifname = "dnsmasq_ipv6"
@@ -333,7 +385,6 @@ defmodule Dnsmasqex.IPv6Test do
       assert {:error, {:ip_in_use, ^existing}} = Server.update(ifname, command, [lease])
     end
 
-    # Inserting with put is allowed, but replacing it must still respect the other reservation.
     assert :ok =
              Server.update(ifname, :put_static_lease6, [%{lease | ip: "fd12:3456:789a:1::101"}])
 

@@ -76,8 +76,35 @@ defmodule Dnsmasqex.DaemonTest do
     end)
   end
 
+  test "manual retries do not let an old timer shorten the next backoff" do
+    property = ["interface", "eth1", "dnsmasq", "status"]
+    VintageNet.subscribe(property)
+    owner = self()
+
+    capture_log(fn ->
+      start_supervised!(
+        {Daemon,
+         ifname: "eth1",
+         command: "sh",
+         args: ["-c", "echo ready; exit 3"],
+         opts: [logger_fun: fn "ready" -> send(owner, :ready) end]}
+      )
+
+      assert_receive :ready, 2000
+      assert_receive {VintageNet, ^property, _, %{state: :retrying, retry_in: 1000}, _}, 2000
+
+      Daemon.retry("eth1")
+
+      assert_receive :ready, 2000
+      assert_receive {VintageNet, ^property, _, %{state: :retrying, retry_in: 2000}, _}, 2000
+      refute_receive :ready, 1500
+      assert_receive :ready, 1500
+    end)
+  end
+
   @tag :tmp_dir
-  test "validates current native directories when the daemon restarts", %{tmp_dir: tmpdir} do
+  test "validates current native directories and recovers when the server restores its configuration",
+       %{tmp_dir: tmpdir} do
     previous = Path.join(tmpdir, "previous")
     current = Path.join(tmpdir, "current")
     File.mkdir!(previous)
@@ -140,6 +167,18 @@ defmodule Dnsmasqex.DaemonTest do
 
     assert_receive {:ready, next_pid}, 2000
     refute next_pid == pid
+
+    property = ["interface", "eth1", "dnsmasq", "status"]
+    VintageNet.subscribe(property)
+    File.rmdir!(current)
+    Process.exit(next_pid, :kill)
+    assert_receive {VintageNet, ^property, _, %{state: :failed}, _}, 5000
+
+    File.mkdir!(previous)
+    stop_supervised!(Server)
+    start_supervised!({Server, ifname: "eth1", tmpdir: tmpdir, config: config})
+    assert_receive {:ready, restored_pid}, 2000
+    refute restored_pid == next_pid
   end
 
   @tag :tmp_dir

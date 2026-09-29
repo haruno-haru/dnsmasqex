@@ -63,6 +63,7 @@ defmodule Dnsmasqex.Leases do
         [expiry, identity, ip, hostname, client_id] <- [String.split(line)],
         {expiry, ""} <- [Integer.parse(expiry)],
         expiry >= 0,
+        String.valid?(ip),
         {:ok, address} <- [IP.ip_to_tuple(ip)],
         identity <- [identity(address, identity, client_id)],
         identity != nil do

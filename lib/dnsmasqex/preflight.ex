@@ -94,8 +94,7 @@ defmodule Dnsmasqex.Preflight do
       File.regular?(Path.join(path, name))
   end
 
-  # --test does not read dhcp-hostsfile or dhcp-optsfile. Check their contents
-  # using the equivalent directives in a separate, temporary configuration.
+  # dnsmasq --test skips the contents of dhcp-hostsfile and dhcp-optsfile.
   defp directives(:records, _contents), do: ""
   defp directives(option, contents) when option in [:directives, :upstreams], do: contents
 

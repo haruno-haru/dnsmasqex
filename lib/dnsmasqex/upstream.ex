@@ -8,6 +8,8 @@ defmodule Dnsmasqex.Upstream do
 
   @spec normalize(String.t() | :inet.ip_address()) :: String.t() | :inet.ip_address()
   def normalize(value) when is_binary(value) do
+    unless String.valid?(value), do: raise(ArgumentError, "Invalid upstream encoding")
+
     [destination | sources] = String.split(value, "@")
     {host, port} = split_port(destination)
     {address, scope} = scoped_address(host)

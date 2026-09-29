@@ -454,6 +454,25 @@ defmodule DnsmasqexTest do
       assert %{mtu: 1400} = runtime("options")
     end
 
+    test "rejects malformed text without losing accepted runtime changes", context do
+      assert :ok = ioctl(:put_record, [{"accepted.lan", "192.168.24.2"}])
+      records = runtime("records")
+      contents = File.read!(context.records_path)
+
+      for {command, args} <- [
+            records: [[{"bad.lan", <<255>>}]],
+            put_option: [:dns, <<255>>],
+            put_static_lease: [{"aa:bb:cc:dd:ee:ff", <<255>>}],
+            directives: [[dhcp_range: <<255>>]],
+            upstreams: [[server: <<255>>]]
+          ] do
+        assert {:error, reason} = ioctl(command, args)
+        assert is_binary(reason)
+        assert runtime("records") == records
+        assert File.read!(context.records_path) == contents
+      end
+    end
+
     test "applies changes while dnsmasq isn't running", context do
       assert :ok = ioctl(:static_leases, [[{"aa:bb:cc:dd:ee:02", "192.168.24.102"}]])
       assert File.read!(context.hosts_path) == "aa:bb:cc:dd:ee:02,192.168.24.102,infinite\n"

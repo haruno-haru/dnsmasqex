@@ -2,6 +2,12 @@
 
 ## v0.1.2
 
+* Cancel stale restart timers and recover a failed daemon when its runtime
+  server restores the original configuration.
+* Match native range comments and quoting when checking service roles, and
+  reject malformed address text without losing accepted runtime changes.
+* Keep generated DHCPv6 reservations on the primary prefix and exclude every
+  configured server address from dynamic pools.
 * Preserve generated DHCP pools after clearing reservations, reject runtime role
   changes that need interface reconfiguration, and validate current directories
   when restarting the daemon. Restore original native directives on Server restart.

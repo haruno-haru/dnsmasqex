@@ -5,8 +5,6 @@
 defmodule Dnsmasqex.Daemon do
   @moduledoc false
 
-  # Wraps MuonTrap.Daemon so that a program that keeps exiting backs off instead
-  # of exhausting its supervisors and taking VintageNet down with them
   use GenServer
   alias Dnsmasqex.Preflight
   alias Dnsmasqex.Server
@@ -36,6 +34,7 @@ defmodule Dnsmasqex.Daemon do
     :args,
     :pid,
     :started_at,
+    :restart_timer,
     :config_path,
     :pid_path,
     opts: [],
@@ -60,7 +59,11 @@ defmodule Dnsmasqex.Daemon do
     do: {:via, Registry, {VintageNet.Interface.Registry, {__MODULE__, ifname}}}
 
   @impl GenServer
-  def handle_cast(:retry, %{pid: nil} = state), do: {:noreply, state, {:continue, :start}}
+  def handle_cast(:retry, %{pid: nil} = state) do
+    _ = if state.restart_timer, do: Process.cancel_timer(state.restart_timer)
+    {:noreply, %{state | restart_timer: nil}, {:continue, :start}}
+  end
+
   def handle_cast(:retry, state), do: {:noreply, state}
 
   @impl GenServer
@@ -75,8 +78,10 @@ defmodule Dnsmasqex.Daemon do
   def handle_continue(:start, state), do: {:noreply, start_daemon(state)}
 
   @impl GenServer
-  def handle_info(:restart, %{pid: nil} = state), do: {:noreply, start_daemon(state)}
-  def handle_info(:restart, state), do: {:noreply, state}
+  def handle_info({:timeout, timer, :restart}, %{restart_timer: timer, pid: nil} = state),
+    do: {:noreply, start_daemon(%{state | restart_timer: nil})}
+
+  def handle_info({:timeout, _timer, :restart}, state), do: {:noreply, state}
 
   def handle_info({:check_started, pid}, %{pid: pid} = state) do
     case running_pid(state.pid_path, state.config_path) do
@@ -100,7 +105,6 @@ defmodule Dnsmasqex.Daemon do
   def handle_info({:EXIT, pid, reason}, %{pid: pid} = state),
     do: {:noreply, schedule_restart(state, reason)}
 
-  # Before OTP 26, a failed start_link also sends the exit of the process that failed
   def handle_info({:EXIT, _pid, _reason}, state), do: {:noreply, state}
 
   @impl GenServer
@@ -165,9 +169,16 @@ defmodule Dnsmasqex.Daemon do
       "[dnsmasqex(#{state.ifname})] #{state.command} stopped (#{inspect(reason)}). Restarting in #{backoff} ms"
     )
 
-    Process.send_after(self(), :restart, backoff)
+    timer = :erlang.start_timer(backoff, self(), :restart)
     publish(state, %{state: :retrying, reason: reason, retry_in: backoff})
-    %{state | pid: nil, started_at: nil, backoff: min(backoff * 2, @max_backoff)}
+
+    %{
+      state
+      | pid: nil,
+        started_at: nil,
+        restart_timer: timer,
+        backoff: min(backoff * 2, @max_backoff)
+    }
   end
 
   defp ran_long_enough?(%{started_at: nil}), do: false

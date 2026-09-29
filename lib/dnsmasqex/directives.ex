@@ -73,6 +73,10 @@ defmodule Dnsmasqex.Directives do
   @positive ~w(dns_forward_max max_tcp_connections port_limit tftp_max tftp_mtu)a
   @ports ~w(port query_port min_port max_port)a
   @names %{filter_a: "filter-A", filter_aaaa: "filter-AAAA"}
+  @quoted_metacharacters ~c"\x00123456 \b\t\n78\r90abcdefABCDE\eF:,."
+                         |> Enum.with_index()
+                         |> Map.new()
+  @quoted_escapes %{?t => ?\t, ?n => ?\n, ?b => ?\b, ?r => ?\r, ?e => ?\e, ?" => ?", ?\\ => ?\\}
 
   @spec supported() :: %{atom() => :boolean | :optional | :integer | :value}
   def supported() do
@@ -118,8 +122,9 @@ defmodule Dnsmasqex.Directives do
 
   defp validate(key, value)
        when (key in @values or key in @optional) and key not in @integers and is_binary(value) do
-    if value == "" or String.trim(value) != value or Regex.match?(~r/[\x00-\x1f\x7f]/, value),
-      do: raise(ArgumentError, "Invalid dnsmasq #{key} value")
+    if value == "" or not String.valid?(value) or String.trim(value) != value or
+         Regex.match?(~r/[\x00-\x1f\x7f]/, value),
+       do: raise(ArgumentError, "Invalid dnsmasq #{key} value")
 
     value
   end
@@ -152,12 +157,47 @@ defmodule Dnsmasqex.Directives do
     size = if family == :inet, do: 4, else: 8
 
     for range <- Keyword.get_values(options, :dhcp_range),
-        fields = range |> String.split(",") |> Enum.map(&String.trim/1),
+        fields = range_fields(range),
         fields = Enum.drop_while(fields, &(not match?({:ok, _}, VintageNet.IP.ip_to_tuple(&1)))),
         [first | _] <- [fields],
         {:ok, address} = VintageNet.IP.ip_to_tuple(first),
         tuple_size(address) == size,
         do: fields
+  end
+
+  defp range_fields(range) do
+    range |> range_contents(false, "") |> String.split(",") |> Enum.map(&String.trim/1)
+  end
+
+  defp range_contents(<<"\"", _::binary>> = range, whitespace?, contents) do
+    case Regex.run(~r/\A"(?:\\.|[^"\\])*"/, range) do
+      [quoted] ->
+        rest = binary_part(range, byte_size(quoted), byte_size(range) - byte_size(quoted))
+        range_character(rest, whitespace?, contents <> quoted_range(quoted))
+
+      nil ->
+        contents <> range
+    end
+  end
+
+  defp range_contents(range, whitespace?, contents),
+    do: range_character(range, whitespace?, contents)
+
+  defp range_character(<<>>, _whitespace?, contents), do: contents
+  defp range_character(<<"#", _::binary>>, true, contents), do: contents
+
+  defp range_character(<<char, rest::binary>>, _whitespace?, contents),
+    do: range_contents(rest, char == ?\s, contents <> <<char>>)
+
+  defp quoted_range(quoted) do
+    contents =
+      quoted
+      |> binary_part(1, byte_size(quoted) - 2)
+      |> String.replace(~r/\\["tnebr\\]/, fn <<?\\, escaped>> ->
+        <<Map.fetch!(@quoted_escapes, escaped)>>
+      end)
+
+    for <<char <- contents>>, into: "", do: <<Map.get(@quoted_metacharacters, char, char)>>
   end
 
   @spec ra?(keyword()) :: boolean()

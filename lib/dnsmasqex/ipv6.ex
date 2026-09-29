@@ -130,15 +130,28 @@ defmodule Dnsmasqex.IPv6 do
       end
 
     check_ra(dnsmasq, ipv6)
-
-    if dnsmasq.static_leases6 != [] and not dhcp_enabled?(dnsmasq),
-      do: raise(ArgumentError, "IPv6 static leases need stateful DHCPv6")
+    check_reservations(dnsmasq, ipv6)
 
     if dnsmasq.options6 != %{} and not Map.has_key?(dnsmasq, :dhcpv6) and
          not native_ranges?(dnsmasq),
        do: raise(ArgumentError, "dnsmasq :options6 requires :dhcpv6")
 
     dnsmasq
+  end
+
+  defp check_reservations(dnsmasq, ipv6) do
+    if dnsmasq.static_leases6 != [] and not dhcp_enabled?(dnsmasq),
+      do: raise(ArgumentError, "IPv6 static leases need stateful DHCPv6")
+
+    if Map.has_key?(dnsmasq, :dhcpv6) and
+         not Enum.all?(dnsmasq.static_leases6, &lease_subnet?(&1.ip, ipv6)),
+       do:
+         raise(
+           ArgumentError,
+           "DHCPv6 reservations must use the primary prefix; use native ranges for multiple prefixes"
+         )
+
+    :ok
   end
 
   defp check_ra(dnsmasq, ipv6) do
@@ -211,7 +224,9 @@ defmodule Dnsmasqex.IPv6 do
           "The :dhcpv6 pool must use the primary prefix; use native ranges for multiple prefixes"
         )
 
-    if first > last or (first <= ipv6.address and ipv6.address <= last),
+    addresses = [ipv6.address | Enum.map(Map.get(ipv6, :addresses, []), & &1.address)]
+
+    if first > last or Enum.any?(addresses, &(first <= &1 and &1 <= last)),
       do: raise(ArgumentError, "DHCPv6 range must be ordered and exclude the interface's address")
 
     %{range | start: first, end: last}
@@ -325,7 +340,8 @@ defmodule Dnsmasqex.IPv6 do
     do: raise(ArgumentError, "Invalid DHCPv6 option #{inspect(option)}")
 
   defp address!(ip) do
-    with {:ok, address} when tuple_size(address) == 8 <- IP.ip_to_tuple(ip),
+    with true <- not is_binary(ip) or String.valid?(ip),
+         {:ok, address} when tuple_size(address) == 8 <- IP.ip_to_tuple(ip),
          true <- Enum.all?(Tuple.to_list(address), &is_integer/1) do
       address
     else

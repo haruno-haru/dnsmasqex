@@ -104,7 +104,7 @@ defmodule Dnsmasqex.NotificationsTest do
   end
 
   test "ignores invalid neighbors and unconfigured address families", %{context: context} do
-    for ip <- ["invalid", "2001:db8::1"] do
+    for ip <- ["invalid", "2001:db8::1", <<255>>] do
       assert :ok = Notifications.dispatch(["arp-add", "aa:bb:cc:dd:ee:ff", ip], %{}, context)
       assert VintageNet.get(["interface", @ifname, "dnsmasq", "event"]) == nil
     end

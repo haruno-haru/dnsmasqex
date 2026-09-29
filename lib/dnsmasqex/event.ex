@@ -176,7 +176,7 @@ defmodule Dnsmasqex.Event do
       mud_url: env["DNSMASQ_MUD_URL"]
     }
 
-    case IP.ip_to_tuple(ip) do
+    case String.valid?(ip) && IP.ip_to_tuple(ip) do
       {:ok, {_, _, _, _}} ->
         %{
           event
@@ -200,7 +200,7 @@ defmodule Dnsmasqex.Event do
             requested_options: requested_options(env["DNSMASQ_REQUESTED_OPTIONS"], 65_535)
         }
 
-      {:error, _reason} ->
+      _ ->
         %__MODULE__{name: name}
     end
   end

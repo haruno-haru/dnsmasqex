@@ -371,9 +371,9 @@ accepts seconds from 120 to 4_294_967_294 or `:infinite`. DHCPv6 requires a
 prefix length of 64..128; advertisements require /64. Addresses must be on the
 interface's subnet. Pools cannot contain the server's address, and reservations
 cannot use it or the subnet-router anycast address (the subnet's all-zero host
-part). The convenient `:dhcpv6` pool uses the primary prefix; native ranges
-allow multiple prefixes. Applying delegated prefixes is supported through
-`constructor:`; obtaining them requires an external DHCPv6 client.
+part). The convenient `:dhcpv6` pool and its reservations use the primary
+prefix; native ranges allow multiple prefixes. Applying delegated prefixes is
+supported through `constructor:`; obtaining them requires an external DHCPv6 client.
 
 `:enable_ra` defaults to `false`; `:slaac`, `:stateless` and `:ra_only` enable
 advertisements themselves. `:ra_lifetime` controls the advertised default route:
@@ -385,9 +385,9 @@ routes and kernel IPv6 forwarding separately. Dnsmasqex does not enable forwardi
 `:static_leases6` accepts maps with a client `:duid` and `:ip`, plus optional
 `:hostname` and `:lease_time`. DUIDs are colon-separated hex bytes, are compared
 case-insensitively and must be unique; IPs must also be unique. The default
-lease time is infinite. Reservations imply `dhcpv6: %{mode: :static}` when no
-`:dhcpv6` setting is present. Use the client's actual DUID from a lease or event;
-it need not contain its MAC address.
+lease time is infinite. Reservations imply `dhcpv6: %{mode: :static}` when neither
+`:dhcpv6` nor native `dhcp_range` directives are present. Use the client's actual
+DUID from a lease or event; it need not contain its MAC address.
 
 `:options6` is independent of DHCPv4's `:options`. It supports `:dns` and `:ntp`
 IPv6 address lists, `:search` domain lists, and integer DHCPv6 option numbers
@@ -443,9 +443,9 @@ not change the address pool or advertisement mode; use `VintageNet.configure/2`
 to change those.
 
 `ips` may be one address or a list. Invalid values return `{:error, reason}`
-and leave the current ones in place. Lease commands return
-`{:error, :dhcp_disabled}` when the configuration has no range, static leases or
-`:hosts_dir`.
+and leave the current ones in place. IPv4 lease commands return
+`{:error, :dhcp_disabled}` unless address allocation was enabled at startup.
+Clearing reservations leaves the generated pool available for later additions.
 
 Clients get new leases and options when they next renew. If another client has
 a dynamic lease on a new static address, dnsmasq refuses that client's renewal
