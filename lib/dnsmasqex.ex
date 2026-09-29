@@ -131,7 +131,7 @@ defmodule Dnsmasqex do
   For example, `:nftset` must be `true` to use the `:nftsets` option, and
   `:dnssec` to validate DNSSEC.
   """
-  @spec capabilities(String.t(), timeout()) :: {:ok, capabilities()} | {:error, String.t()}
+  @spec capabilities(String.t(), pos_integer()) :: {:ok, capabilities()} | {:error, String.t()}
   def capabilities(dnsmasq \\ Config.dnsmasq_path(), timeout \\ 5_000) do
     case System.find_executable(dnsmasq) do
       nil ->
