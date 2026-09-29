@@ -31,7 +31,8 @@ defmodule Dnsmasqex.Config do
     and implies `dhcpv6: %{mode: :static}` when no mode is configured
   * `:options6` - DHCPv6 options: `:dns` and `:ntp` IPv6 lists, `:search` domain
     lists, or integer option numbers with raw dnsmasq string values. Raw IPv6
-    addresses need brackets. Raw payload types and lengths aren't validated
+    addresses need brackets. The installed dnsmasq checks syntax before startup
+    and updates; raw payload types and lengths remain the caller's responsibility
   * `:static_leases` - `{mac, ip}` or `{mac, ip, hostname}` tuples with
     infinite leases, or maps with a `:mac` and any of `:ip`, `:hostname` and
     `:lease_time`. A map lease with an `:ip` is infinite unless it has a
@@ -58,10 +59,11 @@ defmodule Dnsmasqex.Config do
       interface, since dnsmasq always sends its own
     * integers - option numbers whose value is passed to dnsmasq unmodified,
       so use dnsmasq's format, for example `43 => "4d:53:46:54"`. The caller
-      must keep the encoded payload within 255 bytes; its syntax and payload
-      length aren't validated here
+      must keep the encoded payload within 255 bytes. The installed dnsmasq
+      checks syntax before startup and runtime updates
   * `:name_servers` - upstream DNS servers. Without it, dnsmasq follows the name
-    servers VintageNet writes to `/etc/resolv.conf`. `[]` forwards nothing
+    servers VintageNet writes to `/etc/resolv.conf`. `[]` forwards nothing.
+    Scoped IPv6 strings such as `"fe80::1%eth0"` preserve the upstream interface
   * `:forward_domains` - `{domain, servers}` pairs that forward a domain and its
     subdomains to their own servers. `[]` answers them only from local names
   * `:domain` - the local domain. DHCP clients and records without a dot get
@@ -83,6 +85,13 @@ defmodule Dnsmasqex.Config do
   * `:hosts_dir` - an absolute path to a directory of `dhcp-host` files. It's
     created if missing, and new files are read automatically. Requires
     `inotify` in `Dnsmasqex.capabilities/0`
+  * `:listen_mode` - `:addresses` listens on the configured static addresses;
+    `:interface` listens on all addresses of the interface. Defaults to
+    `:addresses` unless router advertisements are enabled, which require
+    `:interface`
+
+  Unknown keys are rejected. Named and numeric aliases of a DHCP option may
+  not appear together. Runtime put and delete operations accept either form.
   """
 
   alias Dnsmasqex.Config.Names
@@ -95,6 +104,32 @@ defmodule Dnsmasqex.Config do
   alias VintageNet.IP
 
   @runtime_options [:static_leases, :options, :records, :static_leases6, :options6]
+  @options [
+    :start,
+    :end,
+    :lease_time,
+    :static_leases,
+    :records,
+    :domain_records,
+    :cnames,
+    :srv_records,
+    :txt_records,
+    :mx_records,
+    :nftsets,
+    :options,
+    :dhcpv6,
+    :enable_ra,
+    :ra_lifetime,
+    :static_leases6,
+    :options6,
+    :name_servers,
+    :forward_domains,
+    :domain,
+    :authoritative,
+    :lease_path,
+    :hosts_dir,
+    :listen_mode
+  ]
 
   @typedoc false
   @type runtime_option :: :static_leases | :options | :records | :static_leases6 | :options6
@@ -106,6 +141,11 @@ defmodule Dnsmasqex.Config do
   def normalize(config), do: config |> IPv6.normalize() |> normalize_dnsmasq()
 
   defp normalize_dnsmasq(%{dnsmasq: dnsmasq} = config) when is_map(dnsmasq) do
+    unknown = Map.keys(dnsmasq) -- @options
+
+    if unknown != [],
+      do: raise(ArgumentError, "Unsupported dnsmasq options: #{inspect(Enum.sort(unknown))}")
+
     ipv4 = static_ipv4(config)
     ipv6 = IPv6.interface(config)
 
@@ -128,31 +168,6 @@ defmodule Dnsmasqex.Config do
 
     new_dnsmasq =
       dnsmasq
-      |> Map.take([
-        :start,
-        :end,
-        :lease_time,
-        :static_leases,
-        :records,
-        :domain_records,
-        :cnames,
-        :srv_records,
-        :txt_records,
-        :mx_records,
-        :nftsets,
-        :options,
-        :dhcpv6,
-        :enable_ra,
-        :ra_lifetime,
-        :static_leases6,
-        :options6,
-        :name_servers,
-        :forward_domains,
-        :domain,
-        :authoritative,
-        :lease_path,
-        :hosts_dir
-      ])
       |> normalize_range(ipv4)
       |> check_lease_time()
       |> check_path(:hosts_dir, "dhcp-hostsdir")
@@ -172,8 +187,22 @@ defmodule Dnsmasqex.Config do
       |> update_list(:forward_domains, &normalize_forward_domain/1)
       |> normalize_domain()
       |> IPv6.normalize_dnsmasq(ipv6)
+      |> normalize_listen_mode()
 
     %{config | dnsmasq: new_dnsmasq}
+  end
+
+  defp normalize_listen_mode(dnsmasq) do
+    ra? = IPv6.ra_enabled?(dnsmasq)
+    mode = Map.get(dnsmasq, :listen_mode, if(ra?, do: :interface, else: :addresses))
+
+    if mode not in [:addresses, :interface],
+      do: raise(ArgumentError, "dnsmasq :listen_mode must be :addresses or :interface")
+
+    if mode == :addresses and ra?,
+      do: raise(ArgumentError, "dnsmasq router advertisements require listen_mode: :interface")
+
+    Map.put(dnsmasq, :listen_mode, mode)
   end
 
   defp static_ipv4(%{ipv4: %{method: :static} = ipv4}), do: ipv4
@@ -503,6 +532,11 @@ defmodule Dnsmasqex.Config do
 
   defp normalize_options(options, ipv4) when is_map(options) do
     if options != %{}, do: require_ipv4!(ipv4)
+    numbers = Enum.map(options, fn {key, _value} -> option_number(key) end)
+
+    if length(Enum.uniq(numbers)) != length(numbers),
+      do: raise(ArgumentError, "Duplicate DHCPv4 option aliases")
+
     options = Map.new(options, &normalize_option(&1, ipv4))
 
     Enum.each(options, fn {key, _value} = option ->
@@ -517,6 +551,19 @@ defmodule Dnsmasqex.Config do
 
   defp normalize_options(options, _ipv4),
     do: raise(ArgumentError, "Expected a map for dnsmasq :options, got: #{inspect(options)}")
+
+  @doc false
+  @spec option_number(atom() | integer()) :: atom() | integer()
+  def option_number(key) when key in [:netmask, :subnet], do: 1
+  def option_number(:router), do: 3
+  def option_number(:dns), do: 6
+  def option_number(:hostname), do: 12
+  def option_number(:domain), do: 15
+  def option_number(:mtu), do: 26
+  def option_number(:ntp), do: 42
+  def option_number(:serverid), do: 54
+  def option_number(:search), do: 119
+  def option_number(key), do: key
 
   defp normalize_option({:netmask, mask}, ipv4), do: normalize_option({:subnet, mask}, ipv4)
 
@@ -575,7 +622,7 @@ defmodule Dnsmasqex.Config do
     do: raise(ArgumentError, "Invalid dnsmasq option #{inspect(option)}")
 
   defp normalize_name_servers(%{name_servers: servers} = dnsmasq),
-    do: %{dnsmasq | name_servers: ip_list!(servers)}
+    do: %{dnsmasq | name_servers: upstreams!(servers)}
 
   defp normalize_name_servers(dnsmasq), do: dnsmasq
 
@@ -583,13 +630,37 @@ defmodule Dnsmasqex.Config do
   defp normalize_domain(dnsmasq), do: dnsmasq
 
   defp normalize_forward_domain({domain, servers}),
-    do: {domain_pattern!(domain), ip_list!(servers)}
+    do: {domain_pattern!(domain), upstreams!(servers)}
 
   defp normalize_forward_domain(forward),
     do: raise(ArgumentError, "Invalid dnsmasq forward domain #{inspect(forward)}")
 
-  defp ip_list!(ips) when is_list(ips), do: Enum.map(ips, &ip!/1)
-  defp ip_list!(ip), do: [ip!(ip)]
+  defp upstreams!(servers) when is_list(servers), do: Enum.map(servers, &upstream!/1)
+  defp upstreams!(server), do: [upstream!(server)]
+
+  defp upstream!(ip) when is_binary(ip) do
+    case String.split(ip, "%") do
+      [address, scope] ->
+        address = ip!(address)
+
+        if tuple_size(address) != 8 or
+             not Regex.match?(~r/\A[a-zA-Z0-9_.:-]{1,15}\z/, scope),
+           do: raise(ArgumentError, "Invalid scoped IPv6 upstream #{inspect(ip)}")
+
+        IP.ip_to_string(address) <> "%" <> scope
+
+      [_address] ->
+        ip!(ip)
+
+      _ ->
+        raise ArgumentError, "Invalid scoped IPv6 upstream #{inspect(ip)}"
+    end
+  end
+
+  defp upstream!(ip), do: ip!(ip)
+
+  defp upstream_string(ip) when is_binary(ip), do: ip
+  defp upstream_string(ip), do: IP.ip_to_string(ip)
 
   defp ip!(ip) do
     with {:ok, address} <- IP.ip_to_tuple(ip),
@@ -713,6 +784,10 @@ defmodule Dnsmasqex.Config do
         {Daemon,
          ifname: ifname,
          command: dnsmasq_path(),
+         config_path: conf_path(tmpdir, ifname),
+         pid_path: pid_path(tmpdir, ifname),
+         required_features: required_features(config),
+         runtime_files: Enum.map(@runtime_options, &{&1, runtime_path(&1, tmpdir, ifname)}),
          args: ["-k", "-C", conf_path(tmpdir, ifname), "--log-facility=-"],
          opts:
            Command.add_muon_options(
@@ -743,6 +818,27 @@ defmodule Dnsmasqex.Config do
 
   defp add_dnsmasq(raw_config, _config_without_dnsmasq, _opts), do: raw_config
 
+  @doc false
+  @spec required_features(map()) :: [atom()]
+  def required_features(%{dnsmasq: dnsmasq} = config) do
+    upstreams =
+      Map.get(dnsmasq, :name_servers, []) ++ Enum.flat_map(dnsmasq.forward_domains, &elem(&1, 1))
+
+    ipv6? =
+      IPv6.interface(config) != nil or
+        Enum.any?(upstreams, &(is_binary(&1) or tuple_size(&1) == 8))
+
+    [:dhcp, :scripts] ++
+      for {feature, required?} <- [
+            ipv6: ipv6?,
+            dhcpv6: Map.has_key?(dnsmasq, :dhcpv6),
+            inotify: Map.has_key?(dnsmasq, :hosts_dir),
+            nftset: dnsmasq.nftsets != []
+          ],
+          required?,
+          do: feature
+  end
+
   # dnsmasq only watches a hosts directory that exists when it starts
   defp mkdir_cmds(dnsmasq) do
     [Map.get(dnsmasq, :hosts_dir), dnsmasq[:lease_path] && Path.dirname(dnsmasq.lease_path)]
@@ -752,7 +848,7 @@ defmodule Dnsmasqex.Config do
 
   defp dnsmasq_contents(dnsmasq, ifname, ipv4, ipv6, tmpdir) do
     [
-      "interface=#{ifname}",
+      if(dnsmasq.listen_mode == :interface, do: "interface=#{ifname}", else: []),
       "except-interface=lo",
       for(
         subnet <- [ipv4, ipv6],
@@ -796,11 +892,11 @@ defmodule Dnsmasqex.Config do
 
   defp upstream(dnsmasq) do
     resolv = if Map.has_key?(dnsmasq, :name_servers), do: ["no-resolv"], else: []
-    servers = Enum.map(Map.get(dnsmasq, :name_servers, []), &"server=#{IP.ip_to_string(&1)}")
+    servers = Enum.map(Map.get(dnsmasq, :name_servers, []), &"server=#{upstream_string(&1)}")
 
     forwards =
       for {domain, servers} <- dnsmasq.forward_domains,
-          server <- if(servers == [], do: [""], else: Enum.map(servers, &IP.ip_to_string/1)),
+          server <- if(servers == [], do: [""], else: Enum.map(servers, &upstream_string/1)),
           do: "server=/#{domain}/#{server}"
 
     resolv ++ servers ++ forwards

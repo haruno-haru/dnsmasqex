@@ -43,7 +43,7 @@ jobs:
       - name: Install system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential libmnl-dev libnl-genl-3-dev dnsmasq-base
+          sudo apt-get install -y build-essential libmnl-dev libnl-genl-3-dev dnsmasq-base iproute2 python3
       - uses: erlef/setup-beam@v1
         with:
           elixir-version: ${{ matrix.elixir }}
@@ -57,6 +57,18 @@ jobs:
           key: v1-mix-cache-ubuntu-24.04-${{ matrix.elixir }}-${{ matrix.otp }}-${{ hashFiles('mix.lock') }}
       - run: mix deps.get
       - run: mix test
+      - name: Test DHCP and router advertisements in isolated namespaces
+        if: matrix.checks
+        run: |
+          set -o pipefail
+          sudo -n env "PATH=$PATH" "MIX_HOME=$HOME/.mix" "HEX_HOME=$HOME/.hex" DNSMASQEX_NETWORK_TESTS=1 \
+            unshare --net mix test test/dnsmasqex/network_integration_test.exs --trace 2>&1 | tee network-tests.log
+      - name: Save protocol test output
+        if: always() && matrix.checks
+        uses: actions/upload-artifact@v4
+        with:
+          name: network-test-output
+          path: network-tests.log
       - if: matrix.checks
         run: mix format --check-formatted
       - if: matrix.checks

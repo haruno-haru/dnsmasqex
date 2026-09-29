@@ -10,6 +10,27 @@ defmodule Dnsmasqex.IPv6Test do
   alias Dnsmasqex.Server
 
   @moduletag :tmp_dir
+
+  test "requires interface listening for router advertisements" do
+    for mode <- [:slaac, :stateless, :ra_only] do
+      dhcpv6 =
+        if mode == :slaac,
+          do: %{mode: mode, start: "fd12::10", end: "fd12::99"},
+          else: %{mode: mode}
+
+      config = %{
+        ipv6: %{method: :static, address: "fd12::1", prefix_length: 64},
+        dnsmasq: %{dhcpv6: dhcpv6}
+      }
+
+      assert Config.normalize(config).dnsmasq.listen_mode == :interface
+
+      assert_raise ArgumentError, ~r/router advertisements require/, fn ->
+        Config.normalize(put_in(config, [:dnsmasq, :listen_mode], :addresses))
+      end
+    end
+  end
+
   @duid "00:03:00:01:aa:bb:cc:dd:ee:ff"
   @config %{
     type: Dnsmasqex,
@@ -212,6 +233,9 @@ defmodule Dnsmasqex.IPv6Test do
     end
 
     for options <- [
+          %{23 => "[::]", dns: []},
+          %{24 => "lan", search: ["lan"]},
+          %{56 => "[::]", ntp: ["::"]},
           %{dns: "192.168.24.1"},
           %{router: "fd00::1"},
           %{search: "bad name"},
@@ -225,6 +249,7 @@ defmodule Dnsmasqex.IPv6Test do
     end
   end
 
+  @tag :dnsmasq
   test "changes IPv6 reservations and options without disturbing IPv4", %{tmp_dir: tmpdir} do
     ifname = "dnsmasq_ipv6"
 
@@ -257,6 +282,19 @@ defmodule Dnsmasqex.IPv6Test do
     assert File.read!(Config.runtime_path(:options6, tmpdir, ifname)) =~
              "option6:dns-server,[::]\n"
 
+    assert :ok = Server.update(ifname, :put_option6, [23, "[fd12:3456:789a:1::53]"])
+    refute Map.has_key?(VintageNet.get(["interface", ifname, "dnsmasq", "options6"]), :dns)
+
+    options_path = Config.runtime_path(:options6, tmpdir, ifname)
+    previous_file = File.read!(options_path)
+    previous_value = VintageNet.get(["interface", ifname, "dnsmasq", "options6"])
+
+    assert {:error, {:invalid_configuration, _}} =
+             Server.update(ifname, :put_option6, [23, "[not-an-address]"])
+
+    assert File.read!(options_path) == previous_file
+    assert VintageNet.get(["interface", ifname, "dnsmasq", "options6"]) == previous_value
+
     assert :ok = Server.update(ifname, :delete_option6, [:dns])
 
     assert File.read!(Config.runtime_path(:options6, tmpdir, ifname)) ==
@@ -271,6 +309,7 @@ defmodule Dnsmasqex.IPv6Test do
     assert VintageNet.get(["interface", ifname, "dnsmasq", "static_leases6"]) != []
   end
 
+  @tag :dnsmasq
   test "IPv6 reservation changes cannot take another client's address", %{tmp_dir: tmpdir} do
     ifname = "dnsmasq_ipv6_conflicts"
     config = Dnsmasqex.normalize(@config)
@@ -325,6 +364,7 @@ defmodule Dnsmasqex.IPv6Test do
     end
   end
 
+  @tag :dnsmasq
   test "failed IPv6 updates preserve files, published values and subsequent changes", %{
     tmp_dir: tmpdir
   } do

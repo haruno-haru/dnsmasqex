@@ -8,6 +8,10 @@ defmodule Dnsmasqex.DaemonTest do
 
   alias Dnsmasqex.Daemon
 
+  setup do
+    on_exit(fn -> Dnsmasqex.Notifications.clear("eth1") end)
+  end
+
   test "backs off instead of exiting when the daemon exits" do
     capture_log(fn ->
       owner = self()
@@ -30,10 +34,32 @@ defmodule Dnsmasqex.DaemonTest do
       assert_receive {:DOWN, ^ref, :process, ^pid, _reason}, 2000
       assert %{pid: nil, backoff: 2_000} = :sys.get_state(server)
       assert Process.alive?(server)
+      assert %{state: :retrying, retry_in: 1_000} = status()
 
       assert_receive {:ready, next_pid}, 2000
       refute next_pid == pid
       assert %{pid: ^next_pid, backoff: 2_000} = :sys.get_state(server)
+    end)
+  end
+
+  @tag :tmp_dir
+  @tag :dnsmasq
+  test "keeps the supervisor alive and reports a permanent configuration failure", %{
+    tmp_dir: tmpdir
+  } do
+    conf = Path.join(tmpdir, "dnsmasq.conf")
+    File.write!(conf, "not-a-dnsmasq-option\n")
+
+    capture_log(fn ->
+      server =
+        start_supervised!(
+          {Daemon, ifname: "eth1", command: "dnsmasq", args: [], config_path: conf}
+        )
+
+      assert %{pid: nil, backoff: 1_000} = :sys.get_state(server)
+      assert Process.alive?(server)
+      assert %{state: :failed, reason: {:invalid_configuration, message}} = status()
+      assert message =~ "bad option"
     end)
   end
 
@@ -79,5 +105,8 @@ defmodule Dnsmasqex.DaemonTest do
     GenServer.stop(server)
 
     assert_receive {:DOWN, ^ref, :process, ^pid, :shutdown}
+    assert %{state: :stopped} = status()
   end
+
+  defp status(), do: VintageNet.get(["interface", "eth1", "dnsmasq", "status"])
 end

@@ -10,7 +10,9 @@ defmodule Dnsmasqex.Server do
   use GenServer
 
   alias Dnsmasqex.Config
+  alias Dnsmasqex.Daemon
   alias Dnsmasqex.IPv6
+  alias Dnsmasqex.Preflight
 
   require Logger
 
@@ -76,6 +78,7 @@ defmodule Dnsmasqex.Server do
   def handle_call({:update, command, args}, _from, state) do
     with {:ok, option, value} <- validate_change(command, args, state),
          new_state = put_in(state.config.dnsmasq[option], value),
+         :ok <- validate_file(new_state, option),
          :ok <- write_file(new_state, option) do
       :ok = publish(new_state, option)
       {:reply, signal(new_state), new_state}
@@ -176,20 +179,48 @@ defmodule Dnsmasqex.Server do
     do: {:ok, :records, remove_name(state.config.dnsmasq.records, name)}
 
   defp change(:put_option, [key, value], state) do
-    options = Map.put(state.config.dnsmasq.options, key, value)
+    number = Config.option_number(key)
+
+    options =
+      state.config.dnsmasq.options
+      |> Map.reject(fn {existing, _value} -> Config.option_number(existing) == number end)
+      |> Map.put(key, value)
+
     {:ok, :options, normalize(state, :options, options)}
   end
 
-  defp change(:delete_option, [key], state),
-    do: {:ok, :options, Map.drop(state.config.dnsmasq.options, [key | option_aliases(key)])}
+  defp change(:delete_option, [key], state) do
+    number = Config.option_number(key)
+
+    options =
+      Map.reject(state.config.dnsmasq.options, fn {existing, _value} ->
+        Config.option_number(existing) == number
+      end)
+
+    {:ok, :options, options}
+  end
 
   defp change(:put_option6, [key, value], state) do
-    options = Map.put(state.config.dnsmasq.options6, key, value)
+    number = IPv6.option_number(key)
+
+    options =
+      state.config.dnsmasq.options6
+      |> Map.reject(fn {existing, _value} -> IPv6.option_number(existing) == number end)
+      |> Map.put(key, value)
+
     {:ok, :options6, normalize(state, :options6, options)}
   end
 
-  defp change(:delete_option6, [key], state),
-    do: {:ok, :options6, Map.delete(state.config.dnsmasq.options6, key)}
+  defp change(:delete_option6, [key], state) do
+    number = IPv6.option_number(key)
+
+    options =
+      Map.reject(state.config.dnsmasq.options6, fn {existing, _value} ->
+        IPv6.option_number(existing) == number
+      end)
+
+    {:ok, :options6, options}
+  end
 
   defp change(command, args, _state),
     do: {:error, "Invalid dnsmasq ioctl #{inspect(command)} #{inspect(args)}"}
@@ -212,10 +243,6 @@ defmodule Dnsmasqex.Server do
 
   defp same_name?({existing, _ip}, name), do: String.downcase(existing) == String.downcase(name)
 
-  defp option_aliases(:subnet), do: [:netmask]
-  defp option_aliases(:netmask), do: [:subnet]
-  defp option_aliases(_key), do: []
-
   defp write_file(state, option) do
     {path, contents} =
       Config.runtime_file(option, state.config.dnsmasq, state.tmpdir, state.ifname)
@@ -223,6 +250,13 @@ defmodule Dnsmasqex.Server do
     temporary_path = path <> ".new"
 
     with :ok <- File.write(temporary_path, contents), do: File.rename(temporary_path, path)
+  end
+
+  defp validate_file(state, option) do
+    {_path, contents} =
+      Config.runtime_file(option, state.config.dnsmasq, state.tmpdir, state.ifname)
+
+    Preflight.runtime(Config.dnsmasq_path(), option, contents, state.tmpdir)
   end
 
   defp publish(state, option) do
@@ -241,17 +275,10 @@ defmodule Dnsmasqex.Server do
   end
 
   defp running_dnsmasq(state) do
-    conf_path = Config.conf_path(state.tmpdir, state.ifname)
-
-    with {:ok, contents} <- File.read(Config.pid_path(state.tmpdir, state.ifname)),
-         {pid, ""} when pid > 0 <- Integer.parse(String.trim(contents)),
-         {:ok, cmdline} <- File.read("/proc/#{pid}/cmdline"),
-         true <-
-           ["-C", conf_path] in Enum.chunk_every(String.split(cmdline, "\0"), 2, 1, :discard) do
-      {:ok, pid}
-    else
-      _ -> {:error, :not_running}
-    end
+    Daemon.running_pid(
+      Config.pid_path(state.tmpdir, state.ifname),
+      Config.conf_path(state.tmpdir, state.ifname)
+    )
   end
 
   defp hangup(pid) do

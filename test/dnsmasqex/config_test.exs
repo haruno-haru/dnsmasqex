@@ -12,6 +12,69 @@ defmodule Dnsmasqex.ConfigTest do
     dnsmasq: %{}
   }
 
+  test "rejects unknown options even when the interface cannot run dnsmasq" do
+    for ipv4 <- [@config.ipv4, %{method: :disabled}],
+        option <- [:dnssec, :port, :cache_size, :startt] do
+      assert_raise ArgumentError, ~r/Unsupported dnsmasq options/, fn ->
+        Config.normalize(%{ipv4: ipv4, dnsmasq: %{option => true}})
+      end
+    end
+  end
+
+  test "preserves the interface scope of IPv6 upstreams through normalization and rendering" do
+    config =
+      Config.normalize(%{
+        @config
+        | dnsmasq: %{
+            name_servers: ["fe80::1%eth0", "1.1.1.1"],
+            forward_domains: [{"lan", ["fe80::2%eth1"]}]
+          }
+      })
+
+    assert Config.normalize(config) == config
+    assert config.dnsmasq.name_servers == ["fe80::1%eth0", {1, 1, 1, 1}]
+
+    raw =
+      Config.add_config(
+        %VintageNet.Interface.RawConfig{
+          ifname: "eth1",
+          type: Dnsmasqex,
+          source_config: config,
+          required_ifnames: ["eth1"]
+        },
+        config,
+        tmpdir: "/tmp"
+      )
+
+    [{_, contents} | _] = raw.files
+    assert contents =~ "server=fe80::1%eth0\n"
+    assert contents =~ "server=/lan/fe80::2%eth1\n"
+
+    for server <- [
+          nil,
+          "fe80::1%",
+          "fe80::1%eth0%eth1",
+          "fe80::1%eth0\nport=0",
+          "192.168.24.1%eth0"
+        ] do
+      assert_raise ArgumentError, fn ->
+        Config.normalize(%{@config | dnsmasq: %{name_servers: [server]}})
+      end
+    end
+  end
+
+  test "rejects DHCPv4 aliases for the same wire option" do
+    for options <- [
+          %{6 => "192.168.24.2", dns: []},
+          %{26 => "1400", mtu: 1500},
+          %{subnet: "255.255.255.0", netmask: "255.255.255.0"}
+        ] do
+      assert_raise ArgumentError, ~r/Duplicate DHCPv4 option aliases/, fn ->
+        Config.normalize(%{@config | dnsmasq: %{options: options}})
+      end
+    end
+  end
+
   test "requires IPv4 and a valid prefix even when serving only DNS" do
     for ipv4 <- [
           %{method: :static, address: {0, 0, 0, 0, 0, 0, 0, 1}, prefix_length: 24},

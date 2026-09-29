@@ -88,7 +88,7 @@ defmodule Dnsmasqex.IPv6 do
 
     if not is_boolean(enable_ra), do: raise(ArgumentError, "dnsmasq :enable_ra must be a boolean")
 
-    ra? = enable_ra or get_in(dnsmasq, [:dhcpv6, :mode]) in @ra_modes
+    ra? = ra_enabled?(dnsmasq)
 
     if ra? and (is_nil(ipv6) or ipv6.prefix_length != 64),
       do: raise(ArgumentError, "dnsmasq router advertisements require an IPv6 /64")
@@ -216,6 +216,11 @@ defmodule Dnsmasqex.IPv6 do
   end
 
   defp normalize_options(options) when is_map(options) do
+    numbers = Enum.map(options, fn {key, _value} -> option_number(key) end)
+
+    if length(Enum.uniq(numbers)) != length(numbers),
+      do: raise(ArgumentError, "Duplicate DHCPv6 option aliases")
+
     Map.new(options, fn option ->
       normalized = normalize_option(option)
       _ = line!(option_line(normalized))
@@ -225,6 +230,12 @@ defmodule Dnsmasqex.IPv6 do
 
   defp normalize_options(options),
     do: raise(ArgumentError, "Expected a map for :options6, got: #{inspect(options)}")
+
+  @spec option_number(atom() | integer()) :: atom() | integer()
+  def option_number(:dns), do: 23
+  def option_number(:search), do: 24
+  def option_number(:ntp), do: 56
+  def option_number(key), do: key
 
   defp normalize_option({name, ips}) when name in [:dns, :ntp] and not is_nil(ips),
     do: {name, Enum.map(List.wrap(ips), &address!/1)}
@@ -285,6 +296,10 @@ defmodule Dnsmasqex.IPv6 do
   @spec dhcp_enabled?(map()) :: boolean()
   def dhcp_enabled?(%{dhcpv6: %{mode: mode}}), do: mode in [:stateful, :static, :slaac]
   def dhcp_enabled?(_dnsmasq), do: false
+
+  @spec ra_enabled?(map()) :: boolean()
+  def ra_enabled?(dnsmasq),
+    do: Map.get(dnsmasq, :enable_ra, false) or get_in(dnsmasq, [:dhcpv6, :mode]) in @ra_modes
 
   @spec config_lines(map(), interface() | nil, String.t()) :: [String.t()]
   def config_lines(%{dhcpv6: range} = dnsmasq, ipv6, ifname) do

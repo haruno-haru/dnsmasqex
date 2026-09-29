@@ -118,10 +118,8 @@ defmodule Dnsmasqex do
   For example, `:nftset` must be `true` to use the `:nftsets` option, and
   `:dnssec` to validate DNSSEC.
   """
-  @spec capabilities() :: {:ok, capabilities()} | {:error, String.t()}
-  def capabilities() do
-    dnsmasq = Config.dnsmasq_path()
-
+  @spec capabilities(String.t()) :: {:ok, capabilities()} | {:error, String.t()}
+  def capabilities(dnsmasq \\ Config.dnsmasq_path()) do
     case System.find_executable(dnsmasq) do
       nil ->
         {:error, "Can't find #{dnsmasq}"}
@@ -131,6 +129,8 @@ defmodule Dnsmasqex do
         |> System.cmd(["--version"], stderr_to_stdout: true, env: [{"LC_ALL", "C"}])
         |> parse_version()
     end
+  rescue
+    error in ErlangError -> {:error, "Can't execute #{dnsmasq}: #{inspect(error.original)}"}
   end
 
   defp parse_version({output, 0}) do

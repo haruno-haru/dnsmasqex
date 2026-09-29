@@ -71,7 +71,6 @@ defmodule DnsmasqexTest do
            ] = raw_config.files
 
     assert contents == """
-           interface=eth1
            except-interface=lo
            listen-address=192.168.24.1
            bind-interfaces
@@ -366,6 +365,7 @@ defmodule DnsmasqexTest do
   end
 
   describe "runtime ioctls" do
+    @describetag :dnsmasq
     @hosts """
     aa:bb:cc:dd:ee:ff,192.168.24.100,infinite
     aa:bb:cc:dd:ee:01,192.168.24.101,printer,infinite
@@ -528,6 +528,27 @@ defmodule DnsmasqexTest do
       refute Map.has_key?(runtime("options"), :subnet)
       refute File.read!(context.options_path) =~ "43,"
       assert File.read!(context.options_path) =~ "option:ntp-server,192.168.24.1\n"
+    end
+
+    test "replaces and removes an option through either its name or number", context do
+      assert :ok = ioctl(:put_option, [6, "192.168.24.2"])
+      refute Map.has_key?(runtime("options"), :dns)
+      assert runtime("options")[6] == "192.168.24.2"
+      assert :ok = ioctl(:put_option, [:dns, "192.168.24.3"])
+      refute Map.has_key?(runtime("options"), 6)
+      assert :ok = ioctl(:delete_option, [6])
+      refute Map.has_key?(runtime("options"), :dns)
+      refute File.read!(context.options_path) =~ "dns-server"
+    end
+
+    test "dnsmasq rejects a raw option before it replaces the working file", context do
+      original = File.read!(context.options_path)
+      published = runtime("options")
+      assert {:error, {:invalid_configuration, _}} = ioctl(:put_option, [6, "not-an-address"])
+      assert File.read!(context.options_path) == original
+      assert runtime("options") == published
+      assert :ok = ioctl(:put_option, [:dns, "192.168.24.2"])
+      assert runtime("options").dns == [{192, 168, 24, 2}]
     end
 
     test "returns file errors without changing the current values", context do

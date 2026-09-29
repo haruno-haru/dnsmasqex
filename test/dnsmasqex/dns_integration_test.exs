@@ -6,6 +6,7 @@ defmodule Dnsmasqex.DNSIntegrationTest do
   use ExUnit.Case, async: true
 
   alias Dnsmasqex.Config
+  alias Dnsmasqex.Daemon
   alias Dnsmasqex.Notifications
   alias Dnsmasqex.Server
   alias VintageNet.Interface.RawConfig
@@ -24,6 +25,14 @@ defmodule Dnsmasqex.DNSIntegrationTest do
       assert resolve("esp32.lan", :aaaa, port, tcp?) == [@address]
       assert resolve("esp32.lan", :a, port, tcp?) == [{192, 168, 24, 100}]
       assert resolve("device.apps.lan", :aaaa, port, tcp?) == [@address]
+
+      assert :inet_res.lookup(
+               ~c"esp32.lan",
+               :in,
+               :a,
+               [nameservers: [{{127, 0, 0, 1}, port}], timeout: 100, retry: 1, usevc: tcp?],
+               200
+             ) == []
     end
   end
 
@@ -43,8 +52,23 @@ defmodule Dnsmasqex.DNSIntegrationTest do
     assert resolve("esp32.lan", :aaaa, port) == [address]
   end
 
-  defp start_dnsmasq(tmpdir) do
+  @tag :linux
+  test "reports a port conflict and becomes ready after the port is released", %{tmp_dir: tmpdir} do
+    property = ["interface", "lo", "dnsmasq", "status"]
+    VintageNet.subscribe(property)
+    %{port: port, socket: socket} = start_dnsmasq(tmpdir, true)
+    assert_receive {VintageNet, ^property, _, %{state: :retrying}, _}, 3000
+    :ok = :gen_tcp.close(socket)
+    assert_receive {VintageNet, ^property, _, %{state: :running, pid: pid}, _}, 5000
+    assert pid > 0
+    assert resolve("esp32.lan", :aaaa, port) == [@address]
+    stop_supervised!(Daemon)
+    assert VintageNet.get(property) == %{state: :stopped}
+  end
+
+  defp start_dnsmasq(tmpdir, block_port? \\ false) do
     ifname = if :os.type() == {:unix, :linux}, do: "lo", else: "lo0"
+    on_exit(fn -> Notifications.clear(ifname) end)
 
     config =
       Config.normalize(%{
@@ -80,7 +104,7 @@ defmodule Dnsmasqex.DNSIntegrationTest do
 
     {:ok, socket} = :gen_tcp.listen(0, [:inet6, ip: @loopback])
     {:ok, port} = :inet.port(socket)
-    :ok = :gen_tcp.close(socket)
+    if block_port?, do: on_exit(fn -> :gen_tcp.close(socket) end), else: :gen_tcp.close(socket)
 
     args = [
       "--keep-in-foreground",
@@ -91,9 +115,13 @@ defmodule Dnsmasqex.DNSIntegrationTest do
       Config.conf_path(tmpdir, ifname)
     ]
 
-    start_supervised!({MuonTrap.Daemon, ["dnsmasq", args, [stderr_to_stdout: true]]})
+    start_supervised!({Daemon, ifname: ifname, command: "dnsmasq", args: args,
+      config_path: Config.conf_path(tmpdir, ifname), pid_path: Config.pid_path(tmpdir, ifname),
+      required_features: Config.required_features(config),
+      runtime_files: Enum.map(Config.runtime_options(), &{&1, Config.runtime_path(&1, tmpdir, ifname)}),
+      opts: [stderr_to_stdout: true, log_output: :debug]})
 
-    %{port: port, ifname: ifname, config: config}
+    %{port: port, ifname: ifname, config: config, socket: socket}
   end
 
   defp eventually_resolve(name, type, port, attempts) do

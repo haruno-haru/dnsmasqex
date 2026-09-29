@@ -31,6 +31,9 @@ end
 > config :dnsmasqex, dnsmasq: "/usr/sbin/dnsmasq"
 > ```
 
+Dnsmasqex uses the system's unmodified dnsmasq executable. It does not bundle
+or require a patched binary.
+
 ## Using
 
 Dnsmasqex runs on an interface with a static IPv4 or IPv6 address. Set `:type`
@@ -87,8 +90,10 @@ are described in [IPv6 and dual stack](#ipv6-and-dual-stack).
   its own address as the router and DNS server unless `:router` or `:dns` is
   set, and `[]` sends neither. Integer options are passed to dnsmasq unmodified,
   so they use its `--dhcp-option` format, such as `43 => "4d:53:46:54"`. Their
-  syntax and encoded payload length aren't validated; the caller must keep
-  the payload within 255 bytes. dnsmasq logs and skips invalid values
+  syntax is checked by the installed dnsmasq before startup and runtime
+  updates. The caller must still choose the correct payload type and keep it
+  within 255 bytes. Named and numeric aliases of the same option cannot appear
+  together; `:put_option` replaces either form and `:delete_option` removes either
 * `:authoritative` - `true` when dnsmasq is the only DHCP server on the network,
   so clients with leases it doesn't know get addresses right away
 * `:lease_path` - an absolute path for the lease file, so leases survive a
@@ -111,7 +116,8 @@ are described in [IPv6 and dual stack](#ipv6-and-dual-stack).
 * `:txt_records` - `{name, text}` or `{name, [text]}` pairs
 * `:mx_records` - `{name, target}` or `{name, target, preference}` tuples
 * `:name_servers` - upstream DNS servers. Without it, dnsmasq follows the name
-  servers VintageNet writes to `/etc/resolv.conf`. `[]` forwards nothing
+  servers VintageNet writes to `/etc/resolv.conf`. `[]` forwards nothing.
+  Scoped IPv6 strings such as `"fe80::1%eth0"` select the upstream interface
 * `:forward_domains` - `{domain, servers}` pairs that forward a domain and its
   subdomains to their own servers. `[]` answers them only from local names
 * `:nftsets` - `{domains, sets}` pairs that add the addresses dnsmasq resolves
@@ -120,8 +126,14 @@ are described in [IPv6 and dual stack](#ipv6-and-dual-stack).
   to take only that family. Domains include their subdomains; `"#"` matches
   all domains. Wildcards aren't supported. See [Checking dnsmasq and the
   kernel](#checking-dnsmasq-and-the-kernel)
+* `:listen_mode` - `:addresses` listens only on the configured static addresses.
+  `:interface` listens on all addresses of the interface, including link-local
+  IPv6 addresses. Defaults to `:addresses` without router advertisements and
+  `:interface` with them. RA requires `:interface`; combining RA with
+  `:addresses` is rejected
 
 Don't combine `:dnsmasq` with `:dhcpd` or `:dnsd` on the same interface.
+Unknown `:dnsmasq` keys raise an error instead of being ignored.
 Static leases must have unique MAC and IP addresses and cannot use the server's
 address or the subnet's network or broadcast address.
 
@@ -208,7 +220,7 @@ Set the interface's `:ipv6` address alongside `:ipv4` for dual stack, or use
 `ipv4: %{method: :disabled}` for IPv6 only. Dnsmasqex adds the static IPv6
 address after the wrapped technology brings up the interface and removes it
 on shutdown. It uses Linux's `ip -6 addr` commands; the wrapped technology
-continues to handle the link and IPv4. DNS listens on both configured families.
+continues to handle the link and IPv4. DNS listens according to `:listen_mode`.
 
 The `:ipv6` map accepts only `:method`, `:address` and `:prefix_length` for a
 static address, or `%{method: :disabled}` to leave IPv6 unmanaged. It does not
@@ -281,7 +293,9 @@ IPv6 address lists, `:search` domain lists, and integer DHCPv6 option numbers
 whose string values use dnsmasq's `option6:` syntax. IPv6 addresses in raw
 values need brackets, for example `%{23 => "[fd12:3456:789a:1::1]"}`. Named
 options add the brackets automatically. `dns: []` suppresses the default DNS
-option. Raw option payload types and encoded lengths are the caller's responsibility.
+option. The installed dnsmasq checks raw syntax; payload types and encoded
+lengths remain the caller's responsibility. Named and numeric option aliases
+have the same replacement and deletion behavior as DHCPv4.
 
 For IPv6 DNS alone, configure `:ipv6` and omit `:dhcpv6`, `:static_leases6` and
 `:enable_ra`. Records, domain records, upstream servers and domain-specific
@@ -362,6 +376,15 @@ version and aren't checked here.
 `VintageNet.verify_system/0` checks that dnsmasq can serve DHCP and run the
 script that reports events.
 
+Before each daemon start, Dnsmasqex checks the capabilities required by that
+interface: DHCP and scripts, IPv6 and DHCPv6 when used, inotify for `:hosts_dir`,
+and nftset plus kernel support for `:nftsets`. It also runs `dnsmasq --test`
+against the generated configuration and equivalent directives for its runtime
+lease and option files, since dnsmasq's own test skips those files.
+Runtime lease and option updates pass the same syntax check before replacing
+the current file; a rejected update leaves both the file and published value intact.
+Externally managed files in `:hosts_dir` are still read and checked by dnsmasq.
+
 ## Properties
 
 In addition to the common `vintage_net` properties for all interface types, this
@@ -376,6 +399,15 @@ Property                | Values                       | Description
 `dnsmasq/records`       | `[{name, ip}, ...]`          | The records in use
 `dnsmasq/static_leases6` | `[lease, ...]`              | The IPv6 reservations in use
 `dnsmasq/options6`      | `%{option => value}`        | The DHCPv6 options in use
+`dnsmasq/status`        | `%{state: atom(), ...}`     | Daemon lifecycle and startup failures
+
+Status is `:starting`, `:running`, `:retrying`, `:failed` or `:stopped`.
+`:running` includes the verified OS `:pid`; it indicates daemon startup, not
+an end-to-end network health check. `:retrying` includes `:reason` and
+`:retry_in` in milliseconds. `:failed` includes the preflight `:reason`, such
+as `{:missing_features, [:dhcpv6]}` or `{:invalid_configuration, message}`.
+Fix the reported problem and reconfigure the interface to retry a preflight
+failure. Removing the interface clears these properties.
 
 A lease looks like this:
 
@@ -438,8 +470,7 @@ script arguments do not identify their interface.
 
 dnsmasq's output is logged at the `:debug` level. On Nerves, run
 `RingLogger.next` or `log_attach` from an IEx prompt, and lower the log level
-if needed. dnsmasq logs the lines it can't use in integer `:options` and skips
-them rather than failing.
+if needed. Errors found before startup also appear in `dnsmasq/status`.
 
 If dnsmasq exits, Dnsmasqex logs the reason and restarts it, waiting
 longer each time up to 30 seconds. A common reason is another program already
@@ -448,6 +479,20 @@ using port 53 or 67 on the interface's address.
 ## Development
 
 Run `mix test`, `mix format --check-formatted`, `mix credo --strict`, and
-`mix dialyzer`. Linux runs the process identity and signal tests. Installing
-dnsmasq also enables tests that check generated configuration with
-`dnsmasq --test`.
+`mix dialyzer`. Linux runs the process identity, signal and recovery tests.
+Installing dnsmasq enables configuration checks and real DNS queries over
+UDP and TCP. CI tests the distribution's dnsmasq package.
+
+The packet tests require Linux, root, `iproute2`, Python 3 and dnsmasq. Run
+them in a fresh network namespace after `mix deps.get` and `mix test`:
+
+```sh
+sudo env "PATH=$PATH" "MIX_HOME=$HOME/.mix" "HEX_HOME=$HOME/.hex" DNSMASQEX_NETWORK_TESTS=1 \
+  unshare --net mix test test/dnsmasqex/network_integration_test.exs --trace
+```
+
+They create a separate client namespace connected by a virtual Ethernet pair,
+use the generated configuration and supervised processes, and verify DHCPv4
+and DHCPv6 allocation, renewal, release, live options, lease events, DNS records,
+scoped upstream forwarding and RA flags, prefixes and DNS options. CI runs
+these tests; the ordinary test suite excludes them.
