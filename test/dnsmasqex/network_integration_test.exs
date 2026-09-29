@@ -196,7 +196,9 @@ defmodule Dnsmasqex.NetworkIntegrationTest do
 
   test "reports every completed transfer when the same TFTP file is requested twice", context do
     path = Path.join(context.tmp_dir, "boot.img")
-    File.write!(path, "esp boot image")
+    contents = "esp boot image"
+    size = byte_size(contents)
+    File.write!(path, contents)
     property = ["interface", @ifname, "dnsmasq", "event"]
     VintageNet.subscribe(property)
 
@@ -206,10 +208,10 @@ defmodule Dnsmasqex.NetworkIntegrationTest do
 
     events =
       for _ <- 1..2 do
-        assert client(context, ["tftp", "boot.img", "esp boot image"]) == ""
+        assert client(context, ["tftp", "boot.img", contents]) == ""
 
         assert_receive {VintageNet, ^property, _,
-                        %Event{name: "tftp", file_name: ^path, file_size: 13} = event, _},
+                        %Event{name: "tftp", file_name: ^path, file_size: ^size} = event, _},
                        3000
 
         event
