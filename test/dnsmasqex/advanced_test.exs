@@ -212,6 +212,44 @@ defmodule Dnsmasqex.AdvancedTest do
     assert elem(hd(raw(config, tmpdir).files), 1) =~ "dhcp-range=192.0.2.0,static"
   end
 
+  test "native RA ranges accept spaces and still require interface listening" do
+    config = %{
+      ipv6: %{method: :static, address: "fd12::1", prefix_length: 64},
+      dnsmasq: %{directives: [dhcp_range: "fd12::, ra-only, 64"]}
+    }
+
+    assert Config.normalize(config).dnsmasq.listen_mode == :interface
+
+    assert_raise ArgumentError, ~r/interface/, fn ->
+      Config.normalize(put_in(config, [:dnsmasq, :listen_mode], :addresses))
+    end
+  end
+
+  test "native pools determine IPv4 allocation even when reservation files exist" do
+    config =
+      Config.normalize(%{
+        @base
+        | dnsmasq: %{
+            static_leases: [{"02:00:00:00:00:02", "192.0.2.100"}],
+            directives: [dhcp_range: "192.0.2.0,proxy"]
+          }
+      })
+
+    refute Config.dhcp_enabled?(config.dnsmasq)
+  end
+
+  test "IPv6 reservations cannot implicitly mix generated pools with native IPv4 pools" do
+    assert_raise ArgumentError, ~r/static leases need stateful DHCPv6/, fn ->
+      Config.normalize(%{
+        ipv6: %{method: :static, address: "fd12::1", prefix_length: 64},
+        dnsmasq: %{
+          directives: [dhcp_range: "192.0.2.100,192.0.2.110"],
+          static_leases6: [%{duid: "00:03:00:01:02:03", ip: "fd12::100"}]
+        }
+      })
+    end
+  end
+
   @tag :dnsmasq
   test "the system parser checks native policies, records, and boot configuration together", %{
     tmp_dir: tmpdir

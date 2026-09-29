@@ -43,6 +43,10 @@ defmodule Dnsmasqex.Server do
           {:ok, {:inet.ip_address(), pos_integer()}} | {:error, term()}
   def dns_endpoint(ifname), do: call(ifname, :dns_endpoint)
 
+  @spec preflight_config(VintageNet.ifname()) ::
+          {:ok, [atom()], [{atom(), Path.t()}]} | {:error, term()}
+  def preflight_config(ifname), do: call(ifname, :preflight_config)
+
   defp call(ifname, request) do
     GenServer.call(via_name(ifname), request, 180_000)
   catch
@@ -60,18 +64,25 @@ defmodule Dnsmasqex.Server do
       ifname: Keyword.fetch!(args, :ifname),
       tmpdir: Keyword.fetch!(args, :tmpdir),
       config: config,
+      dhcp_services?: Config.dhcp_services?(config.dnsmasq),
       dhcp_enabled?:
         match?(%{ipv4: %{method: :static}}, config) and Config.dhcp_enabled?(config.dnsmasq),
       dhcpv6_enabled?: IPv6.dhcp_enabled?(config.dnsmasq)
     }
 
-    # Rewrite the files too, since they may hold changes from before a restart
+    {native_path, native_contents} =
+      Config.runtime_file(:directives, config.dnsmasq, state.tmpdir, state.ifname)
+
+    operation = if File.read(native_path) == {:ok, native_contents}, do: "HUP", else: "TERM"
+
+    # Rewrite the files too, since they may hold changes from before a restart.
+    # Restoring native directives requires a daemon restart, not just HUP.
     Enum.each(Config.runtime_options(), fn option ->
       :ok = write_file(state, option)
       :ok = publish(state, option)
     end)
 
-    case signal(state) do
+    case signal(state, operation) do
       :ok ->
         :ok
 
@@ -90,14 +101,6 @@ defmodule Dnsmasqex.Server do
          :ok <- write_file(new_state, option) do
       :ok = publish(new_state, option)
 
-      new_state = %{
-        new_state
-        | dhcp_enabled?:
-            match?(%{ipv4: %{method: :static}}, new_state.config) and
-              Config.dhcp_enabled?(new_state.config.dnsmasq),
-          dhcpv6_enabled?: IPv6.dhcp_enabled?(new_state.config.dnsmasq)
-      }
-
       operation = if option == :directives, do: "TERM", else: "HUP"
       {:reply, apply_update(new_state, option, operation), new_state}
     else
@@ -106,7 +109,7 @@ defmodule Dnsmasqex.Server do
   end
 
   def handle_call(:reload, _from, state) do
-    reply = with {:ok, pid} <- running_dnsmasq(state), do: hangup(pid)
+    reply = with {:ok, pid} <- running_dnsmasq(state), do: send_signal(pid, "HUP")
     {:reply, reply, state}
   end
 
@@ -130,12 +133,45 @@ defmodule Dnsmasqex.Server do
     {:reply, reply, state}
   end
 
+  def handle_call(:preflight_config, _from, state) do
+    features = Config.required_features(state.config)
+    features = if state.dhcp_services?, do: [:dhcp, :scripts | features], else: features
+    files = Config.validation_files(state.config, state.tmpdir, state.ifname)
+    {:reply, {:ok, Enum.uniq(features), files}, state}
+  end
+
   # Only input validation errors become replies. Failures after writing a file
   # must not be reported as rejected input while retaining the previous state.
   defp validate_change(command, args, state) do
-    change(command, args, state)
+    with {:ok, option, value} <- change(command, args, state),
+         :ok <- validate_role(state, Map.put(state.config.dnsmasq, option, value)) do
+      {:ok, option, value}
+    end
   rescue
     error in ArgumentError -> {:error, Exception.message(error)}
+  end
+
+  defp validate_role(state, updated) do
+    original = state.config.dnsmasq
+    native_ranges? = Directives.enabled?(original.directives, :dhcp_range)
+
+    if (not state.dhcp_services? and Config.dhcp_services?(updated)) or
+         state.dhcp_enabled? != runtime_dhcp_enabled?(state, updated) or
+         state.dhcpv6_enabled? != IPv6.dhcp_enabled?(updated) or
+         IPv6.ra_enabled?(original) != IPv6.ra_enabled?(updated) or
+         native_ranges? != Directives.enabled?(updated.directives, :dhcp_range) or
+         Keyword.get_values(original.directives, :user) !=
+           Keyword.get_values(updated.directives, :user),
+       do: {:error, :requires_interface_reconfiguration},
+       else: :ok
+  end
+
+  defp runtime_dhcp_enabled?(state, dnsmasq) do
+    # Generated pools survive empty reservation lists. Native pools live in the
+    # replaceable directives file and must still provide IPv4 allocation.
+    match?(%{ipv4: %{method: :static}}, state.config) and
+      (Config.dhcp_enabled?(dnsmasq) or
+         (state.dhcp_enabled? and not Directives.enabled?(dnsmasq.directives, :dhcp_range)))
   end
 
   defp change(command, _args, %{dhcp_enabled?: false}) when command in @lease_commands,
@@ -144,38 +180,9 @@ defmodule Dnsmasqex.Server do
   defp change(command, _args, %{dhcpv6_enabled?: false}) when command in @lease6_commands,
     do: {:error, :dhcpv6_disabled}
 
-  defp change(option, [value], state) when option in [:dhcp_hosts, :dhcp_options] do
-    original = state.config.dnsmasq
-    normalized = normalize(state, option, value)
-    updated = Map.put(original, option, normalized)
-
-    cond do
-      not Config.dhcp_services?(original) ->
-        {:error, :dhcp_disabled}
-
-      Config.dhcp_enabled?(original) != Config.dhcp_enabled?(updated) ->
-        {:error, :requires_interface_reconfiguration}
-
-      true ->
-        {:ok, option, normalized}
-    end
-  end
-
-  defp change(:directives, [value], state) do
-    normalized = Config.normalize_value(state.config, :directives, value)
-    original = state.config.dnsmasq
-    updated = Map.put(original, :directives, normalized)
-
-    if Config.dhcp_services?(original) != Config.dhcp_services?(updated) or
-         Config.dhcp_enabled?(original) != Config.dhcp_enabled?(updated) or
-         IPv6.dhcp_enabled?(original) != IPv6.dhcp_enabled?(updated) or
-         IPv6.ra_enabled?(original) != IPv6.ra_enabled?(updated) or
-         Directives.enabled?(original.directives, :dhcp_range) !=
-           Directives.enabled?(normalized, :dhcp_range) or
-         Keyword.get_values(original.directives, :user) != Keyword.get_values(normalized, :user),
-       do: {:error, :requires_interface_reconfiguration},
-       else: {:ok, :directives, normalized}
-  end
+  defp change(command, _args, %{dhcp_services?: false})
+       when command in [:dhcp_hosts, :dhcp_options],
+       do: {:error, :dhcp_disabled}
 
   defp change(option, [value], state)
        when option in [
@@ -184,7 +191,10 @@ defmodule Dnsmasqex.Server do
               :records,
               :static_leases6,
               :options6,
-              :upstreams
+              :upstreams,
+              :directives,
+              :dhcp_hosts,
+              :dhcp_options
             ],
        do: {:ok, option, normalize(state, option, value)}
 
@@ -382,9 +392,9 @@ defmodule Dnsmasqex.Server do
     )
   end
 
-  defp signal(state) do
+  defp signal(state, operation) do
     case running_dnsmasq(state) do
-      {:ok, pid} -> hangup(pid)
+      {:ok, pid} -> send_signal(pid, operation)
       {:error, :not_running} -> :ok
     end
   end
@@ -395,8 +405,6 @@ defmodule Dnsmasqex.Server do
       Config.conf_path(state.tmpdir, state.ifname)
     )
   end
-
-  defp hangup(pid), do: send_signal(pid, "HUP")
 
   defp send_signal(pid, signal) do
     case Dnsmasqex.Command.run("kill", ["-#{signal}", Integer.to_string(pid)], 1_000) do

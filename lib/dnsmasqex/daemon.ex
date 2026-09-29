@@ -9,6 +9,7 @@ defmodule Dnsmasqex.Daemon do
   # of exhausting its supervisors and taking VintageNet down with them
   use GenServer
   alias Dnsmasqex.Preflight
+  alias Dnsmasqex.Server
   require Logger
 
   @min_backoff 1_000
@@ -125,15 +126,21 @@ defmodule Dnsmasqex.Daemon do
 
   defp preflight(%{config_path: nil}), do: :ok
 
-  defp preflight(state),
-    do:
-      Preflight.check(
-        state.command,
-        state.config_path,
-        state.required_features,
-        state.runtime_files,
-        state.preflight_timeout
-      )
+  defp preflight(state) do
+    {features, files} =
+      case Server.preflight_config(state.ifname) do
+        {:ok, features, files} -> {features, files}
+        {:error, :not_running} -> {state.required_features, state.runtime_files}
+      end
+
+    Preflight.check(
+      state.command,
+      state.config_path,
+      features,
+      files,
+      state.preflight_timeout
+    )
+  end
 
   defp launch(state) do
     Logger.debug("[dnsmasqex(#{state.ifname})] starting #{state.command}")

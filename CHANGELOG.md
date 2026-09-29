@@ -2,6 +2,12 @@
 
 ## v0.1.2
 
+* Preserve generated DHCP pools after clearing reservations, reject runtime role
+  changes that need interface reconfiguration, and validate current directories
+  when restarting the daemon. Restore original native directives on Server restart.
+* Distinguish native proxy pools from address allocation, recognize whitespace in
+  native RA ranges, and reject conflicting implicit IPv6 pools and reservations
+  that overlap any server address.
 * Support advanced native dnsmasq policies through a validated directive catalog:
   DNSSEC, filtering, cache and forwarding controls, tagged DHCP, multiple pools,
   IPv6 prefix constructors, RA parameters, DNS records and authoritative zones,

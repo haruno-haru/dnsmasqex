@@ -414,6 +414,10 @@ defmodule DnsmasqexTest do
       config = Dnsmasqex.normalize(config)
       PropertyTable.put(VintageNet, ["interface", "ioctl0", "config"], config)
       tmpdir = Application.fetch_env!(:vintage_net, :tmpdir)
+
+      for {path, contents} <- Dnsmasqex.to_raw_config("ioctl0", config, tmpdir: tmpdir).files,
+          do: File.write!(path, contents)
+
       start_supervised!({Server, ifname: "ioctl0", tmpdir: tmpdir, config: config})
     end
 
@@ -491,6 +495,45 @@ defmodule DnsmasqexTest do
 
       assert File.read!(context.hosts_path) ==
                "aa:bb:cc:dd:ee:01,192.168.24.101,printer,infinite\n"
+    end
+
+    test "can repopulate a static-only pool after removing its last reservation", context do
+      stop_supervised!(Server)
+      lease = {"aa:bb:cc:dd:ee:ff", "192.168.24.100"}
+      start_server(%{@config | dnsmasq: %{static_leases: [lease]}})
+
+      assert :ok = ioctl(:remove_static_lease, [elem(lease, 0)])
+      assert File.read!(context.hosts_path) == ""
+      assert :ok = ioctl(:directives, [[cache_size: 32]])
+      assert :ok = ioctl(:add_static_lease, [lease])
+      assert File.read!(context.hosts_path) == "aa:bb:cc:dd:ee:ff,192.168.24.100,infinite\n"
+
+      assert :ok = ioctl(:static_leases, [[]])
+      assert :ok = ioctl(:dhcp_hosts, [["id:01:02:03,192.168.24.101"]])
+      assert :ok = ioctl(:put_static_lease, [lease])
+    end
+
+    test "can empty and refill native reservations without changing the generated pool" do
+      stop_supervised!(Server)
+      lease = "id:01:02:03,192.168.24.100"
+      start_server(%{@config | dnsmasq: %{dhcp_hosts: [lease]}})
+
+      assert :ok = ioctl(:dhcp_hosts, [[]])
+      assert runtime("dhcp_hosts") == []
+      assert :ok = ioctl(:dhcp_hosts, [[lease]])
+      assert runtime("dhcp_hosts") == [lease]
+    end
+
+    test "rejects runtime options that need startup files absent from a DNS-only configuration",
+         context do
+      stop_supervised!(Server)
+      start_server(%{@config | dnsmasq: %{}})
+
+      assert {:error, :requires_interface_reconfiguration} =
+               ioctl(:put_option, [:dns, "192.168.24.1"])
+
+      assert runtime("options") == %{}
+      assert File.read!(context.options_path) == ""
     end
 
     test "applies concurrent changes one after another", context do

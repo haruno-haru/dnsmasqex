@@ -114,9 +114,10 @@ defmodule Dnsmasqex.IPv6 do
       do: raise(ArgumentError, "dnsmasq IPv6 services require a static :ipv6 interface")
 
     dnsmasq =
-      if dnsmasq.static_leases6 != [] and not native_ranges?(dnsmasq),
-        do: Map.put_new(dnsmasq, :dhcpv6, %{mode: :static}),
-        else: dnsmasq
+      if dnsmasq.static_leases6 != [] and
+           not Directives.enabled?(Map.get(dnsmasq, :directives, []), :dhcp_range),
+         do: Map.put_new(dnsmasq, :dhcpv6, %{mode: :static}),
+         else: dnsmasq
 
     normalize_services(dnsmasq, ipv6)
   end
@@ -270,7 +271,7 @@ defmodule Dnsmasqex.IPv6 do
     ip = unicast!(ip)
     subnets = [ipv6 | Map.get(ipv6, :addresses, [])]
 
-    if not Enum.any?(subnets, &lease_subnet?(ip, &1)),
+    if Enum.any?(subnets, &(&1.address == ip)) or not Enum.any?(subnets, &lease_subnet?(ip, &1)),
       do:
         raise(
           ArgumentError,
@@ -282,7 +283,7 @@ defmodule Dnsmasqex.IPv6 do
 
   defp lease_subnet?(ip, subnet) do
     network = IP.to_subnet(subnet.address, subnet.prefix_length)
-    IP.to_subnet(ip, subnet.prefix_length) == network and ip != subnet.address and ip != network
+    IP.to_subnet(ip, subnet.prefix_length) == network and ip != network
   end
 
   defp normalize_options(options) when is_map(options) do

@@ -83,8 +83,11 @@ defmodule Dnsmasqex.Test.DNSStub do
     # Some OTP decoders lowercase names. Echo the original wire question so
     # dnsmasq's randomized-case check sees the exact question it sent.
     question_size = question_size(binary_part(query, 12, byte_size(query) - 12), 0)
-    <<header::binary-size(12), _::binary-size(question_size), rest::binary>> = response
-    header <> binary_part(query, 12, question_size) <> rest
+    answer_offset = 12 + question_size
+
+    binary_part(response, 0, 12) <>
+      binary_part(query, 12, question_size) <>
+      binary_part(response, answer_offset, byte_size(response) - answer_offset)
   end
 
   defp question_size(<<0, _::binary>>, size), do: size + 5

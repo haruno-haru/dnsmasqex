@@ -170,7 +170,10 @@ defmodule Dnsmasqex.DNSIntegrationTest do
     port2 = DNSStub.port(second)
 
     %{port: port, ifname: ifname, config: config} =
-      start_dnsmasq(tmpdir, false, %{upstreams: [server: "127.0.0.1##{port1}"]})
+      start_dnsmasq(tmpdir, false, %{
+        upstreams: [server: "127.0.0.1##{port1}"],
+        directives: [txt_record: "configured.lan,original"]
+      })
 
     start_supervised!({Server, ifname: ifname, tmpdir: tmpdir, config: config})
     assert eventually_resolve("first.example", :a, port, 30) == [{203, 0, 113, 9}]
@@ -192,6 +195,12 @@ defmodule Dnsmasqex.DNSIntegrationTest do
     assert :ok = Server.update(ifname, :directives, [[txt_record: "new.lan,\"after restart\""]])
     assert eventually_resolve("new.lan", :txt, port, 100) == [[~c"after restart"]]
     assert :ok = Server.dump_stats(ifname)
+
+    stop_supervised!(Server)
+    start_supervised!({Server, ifname: ifname, tmpdir: tmpdir, config: config})
+    assert eventually_resolve("configured.lan", :txt, port, 100) == [[~c"original"]]
+    assert resolve("new.lan", :txt, port) == []
+    assert resolve("restored.example", :a, port) == [{203, 0, 113, 9}]
   end
 
   test "serves an authoritative zone with the configured SOA", %{tmp_dir: tmpdir} do

@@ -6,7 +6,10 @@ defmodule Dnsmasqex.DaemonTest do
   use ExUnit.Case
   import ExUnit.CaptureLog
 
+  alias Dnsmasqex.Config
   alias Dnsmasqex.Daemon
+  alias Dnsmasqex.Server
+  alias VintageNet.Interface.RawConfig
 
   setup do
     on_exit(fn -> Dnsmasqex.Notifications.clear("eth1") end)
@@ -71,6 +74,72 @@ defmodule Dnsmasqex.DaemonTest do
       assert %{pid: nil, backoff: 2_000} = :sys.get_state(server)
       assert Process.alive?(server)
     end)
+  end
+
+  @tag :tmp_dir
+  test "validates current native directories when the daemon restarts", %{tmp_dir: tmpdir} do
+    previous = Path.join(tmpdir, "previous")
+    current = Path.join(tmpdir, "current")
+    File.mkdir!(previous)
+    File.mkdir!(current)
+    command = Path.join(tmpdir, "dnsmasq")
+
+    File.write!(command, """
+    #!/bin/sh
+    case "$1" in
+      --version)
+        echo 'Dnsmasq version 2.93'
+        echo 'Compile time options: DHCP inotify'
+        ;;
+      --test) exit 0 ;;
+      *) echo ready; exec sleep 60 ;;
+    esac
+    """)
+
+    File.chmod!(command, 0o700)
+    Application.put_env(:dnsmasqex, :dnsmasq, command)
+    on_exit(fn -> Application.delete_env(:dnsmasqex, :dnsmasq) end)
+
+    config =
+      Config.normalize(%{
+        ipv4: %{method: :static, address: {192, 0, 2, 1}, prefix_length: 24},
+        dnsmasq: %{directives: [dhcp_optsdir: previous]}
+      })
+
+    raw =
+      Config.add_config(
+        %RawConfig{
+          ifname: "eth1",
+          type: Dnsmasqex,
+          source_config: config,
+          required_ifnames: ["eth1"]
+        },
+        config,
+        tmpdir: tmpdir
+      )
+
+    for {path, contents} <- raw.files, do: File.write!(path, contents)
+    start_supervised!({Server, ifname: "eth1", tmpdir: tmpdir, config: config})
+    owner = self()
+
+    start_supervised!(
+      {Daemon,
+       ifname: "eth1",
+       command: command,
+       args: [],
+       config_path: Config.conf_path(tmpdir, "eth1"),
+       required_features: Config.required_features(config),
+       runtime_files: Config.validation_files(config, tmpdir, "eth1"),
+       opts: [logger_fun: fn "ready" -> send(owner, {:ready, self()}) end]}
+    )
+
+    assert_receive {:ready, pid}, 2000
+    assert :ok = Server.update("eth1", :directives, [[dhcp_optsdir: current]])
+    :ok = File.rmdir(previous)
+    Process.exit(pid, :kill)
+
+    assert_receive {:ready, next_pid}, 2000
+    refute next_pid == pid
   end
 
   @tag :tmp_dir

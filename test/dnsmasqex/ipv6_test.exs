@@ -249,6 +249,17 @@ defmodule Dnsmasqex.IPv6Test do
     end
   end
 
+  test "reservations cannot use another server address on an overlapping prefix" do
+    config =
+      put_in(@config, [:ipv6, :addresses], [
+        %{address: "fd12:3456:789a:1::100", prefix_length: 64}
+      ])
+
+    assert_raise ArgumentError, ~r/interface's.*address/, fn ->
+      Dnsmasqex.normalize(config)
+    end
+  end
+
   @tag :dnsmasq
   test "changes IPv6 reservations and options without disturbing IPv4", %{tmp_dir: tmpdir} do
     ifname = "dnsmasq_ipv6"

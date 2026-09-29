@@ -163,9 +163,9 @@ defmodule Dnsmasqex.Directives do
   @spec ra?(keyword()) :: boolean()
   def ra?(options) do
     enabled?(options, :enable_ra) or
-      Enum.any?(Keyword.get_values(options, :dhcp_range), fn range ->
+      Enum.any?(ranges(options, :inet6), fn fields ->
         Enum.any?(
-          String.split(range, ","),
+          fields,
           &(&1 in ["slaac", "ra-only", "ra-stateless", "ra-names", "ra-advrouter"])
         )
       end)

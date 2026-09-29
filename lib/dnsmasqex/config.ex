@@ -31,7 +31,8 @@ defmodule Dnsmasqex.Config do
     Routing and kernel IPv6 forwarding must be configured separately
   * `:static_leases6` - maps with `:duid`, IPv6 `:ip` and optional `:hostname`
     and `:lease_time`. DUIDs and IPs must be unique. Defaults to infinite leases
-    and implies `dhcpv6: %{mode: :static}` when no mode is configured
+    and implies `dhcpv6: %{mode: :static}` when neither a mode nor native
+    `dhcp_range` directives are configured
   * `:options6` - DHCPv6 options: `:dns` and `:ntp` IPv6 lists, `:search` domain
     lists, or integer option numbers with raw dnsmasq string values. Raw IPv6
     addresses need brackets. The installed dnsmasq checks syntax before startup
@@ -1071,19 +1072,24 @@ defmodule Dnsmasqex.Config do
 
   @doc false
   @spec dhcp_enabled?(map()) :: boolean()
-  def dhcp_enabled?(%{start: _, end: _}), do: true
-  def dhcp_enabled?(%{hosts_dir: _}), do: true
-  def dhcp_enabled?(%{static_leases: [_ | _]}), do: true
-
   def dhcp_enabled?(dnsmasq) do
     directives = Map.get(dnsmasq, :directives, [])
 
     if Directives.enabled?(directives, :dhcp_range) do
       Enum.any?(Directives.ranges(directives, :inet), &(Enum.at(&1, 1) != "proxy"))
     else
-      hosts = Map.get(dnsmasq, :dhcp_hosts, []) ++ Keyword.get_values(directives, :dhcp_host)
-      Enum.any?(hosts, &(not String.contains?(&1, "[")))
+      generated_dhcp_pool?(dnsmasq)
     end
+  end
+
+  defp generated_dhcp_pool?(%{start: _, end: _}), do: true
+  defp generated_dhcp_pool?(%{hosts_dir: _}), do: true
+  defp generated_dhcp_pool?(%{static_leases: [_ | _]}), do: true
+
+  defp generated_dhcp_pool?(dnsmasq) do
+    directives = Map.get(dnsmasq, :directives, [])
+    hosts = Map.get(dnsmasq, :dhcp_hosts, []) ++ Keyword.get_values(directives, :dhcp_host)
+    Enum.any?(hosts, &(not String.contains?(&1, "[")))
   end
 
   @doc false
