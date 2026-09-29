@@ -62,10 +62,11 @@ defmodule Dnsmasqex.Daemon do
   def handle_info(:restart, state), do: {:noreply, state}
 
   def handle_info({:check_started, pid}, %{pid: pid} = state) do
-    _ = case running_pid(state.pid_path, state.config_path) do
-      {:ok, os_pid} -> publish(state, %{state: :running, pid: os_pid})
-      {:error, :not_running} -> Process.send_after(self(), {:check_started, pid}, 50)
-    end
+    _ =
+      case running_pid(state.pid_path, state.config_path) do
+        {:ok, os_pid} -> publish(state, %{state: :running, pid: os_pid})
+        {:error, :not_running} -> Process.send_after(self(), {:check_started, pid}, 50)
+      end
 
     {:noreply, state}
   end

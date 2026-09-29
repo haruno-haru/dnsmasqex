@@ -75,19 +75,43 @@ defmodule Dnsmasqex.NetworkIntegrationTest do
     assert is_binary(server_duid) and server_duid != ""
     {:ok, ip4} = VintageNet.IP.ip_to_tuple(address4)
     {:ok, ip6} = VintageNet.IP.ip_to_tuple(address6)
+    assert elem(ip4, 3) in 100..110
+    assert elem(ip6, 7) in 0x100..0x110
     assert resolve("esp32.lan", :a) == [ip4]
     assert resolve("esp32v6.lan", :aaaa) == [ip6]
 
     # The parser accepts this file, but only a new ACK proves SIGHUP loaded it.
     assert :ok = Server.update(@ifname, :put_option, [:dns, ["192.0.2.53"]])
+    assert :ok = Server.update(@ifname, :put_option6, [23, "[fd12:3456:789a:1::53]"])
 
-    assert client(context, ["renew", state_path(context), "192.0.2.53"]) ==
+    assert client(context, ["renew", state_path(context), "192.0.2.53", "fd12:3456:789a:1::53"]) ==
              "#{address4} #{address6}\n"
 
     assert client(context, ["release", state_path(context), "192.0.2.53"]) == ""
     eventually(fn -> leases() == [] end)
     assert resolve("esp32.lan", :a) == []
     assert resolve("esp32v6.lan", :aaaa) == []
+  end
+
+  test "uses MAC and DUID reservations and reloads both when they change", context do
+    lease4 = %{mac: "02:00:00:00:00:02", ip: "192.0.2.120", lease_time: 600}
+    lease6 = %{duid: @duid, ip: "fd12:3456:789a:1::120", lease_time: 600}
+    start_server(context, :stateful, %{static_leases: [lease4], static_leases6: [lease6]})
+
+    assert client(context, ["acquire", state_path(context), "192.0.2.1"]) ==
+             "192.0.2.120 fd12:3456:789a:1::120\n"
+
+    ip(["-n", context.namespace, "addr", "add", "192.0.2.120/24", "dev", @client])
+    assert client(context, ["release", state_path(context), "192.0.2.1"]) == ""
+    eventually(fn -> leases() == [] end)
+
+    assert :ok = Server.update(@ifname, :put_static_lease, [%{lease4 | ip: "192.0.2.121"}])
+
+    assert :ok =
+             Server.update(@ifname, :put_static_lease6, [%{lease6 | ip: "fd12:3456:789a:1::121"}])
+
+    assert client(context, ["acquire", state_path(context), "192.0.2.1"]) ==
+             "192.0.2.121 fd12:3456:789a:1::121\n"
   end
 
   for mode <- [:stateful, :slaac, :stateless, :ra_only] do
@@ -139,7 +163,9 @@ defmodule Dnsmasqex.NetworkIntegrationTest do
           required_ifnames: [@ifname],
           up_cmds: [{:run, "ip", ["addr", "add", "192.0.2.1/24", "dev", @ifname]}]
         },
-        config, tmpdir: context.tmp_dir)
+        config,
+        tmpdir: context.tmp_dir
+      )
 
     Enum.each(raw.files, fn {path, contents} -> File.write!(path, contents) end)
     Enum.each(raw.up_cmds, &run_command/1)
@@ -177,7 +203,9 @@ defmodule Dnsmasqex.NetworkIntegrationTest do
           context.namespace,
           "python3",
           Path.expand("../support/network_client.py", __DIR__) | args
-        ], stderr_to_stdout: true)
+        ],
+        stderr_to_stdout: true
+      )
 
     assert status == 0, output
     output

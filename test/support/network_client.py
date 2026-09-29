@@ -122,15 +122,15 @@ def address6(result):
     return socket.inet_ntop(socket.AF_INET6, addr)
 
 
-def check_options(reply4, reply6, dns4):
+def check_options(reply4, reply6, dns4, dns6):
     assert reply4[6] == socket.inet_aton(dns4), reply4
     assert reply4[3] == socket.inet_aton(SERVER4), reply4
     assert struct.unpack("!I", reply4[51])[0] == 600, reply4
-    assert reply6[23] == socket.inet_pton(socket.AF_INET6, SERVER6), reply6
+    assert reply6[23] == socket.inet_pton(socket.AF_INET6, dns6), reply6
     assert reply6[24] == SEARCH, reply6
 
 
-def lease(action, path, dns4):
+def lease(action, path, dns4, dns6):
     if action == "acquire":
         offered4, offer4 = dhcp4(1, expected=2)
         addr4, reply4 = dhcp4(3, requested=offered4, server=socket.inet_ntoa(offer4[54]))
@@ -158,7 +158,7 @@ def lease(action, path, dns4):
         rebound = dhcp6(6, address=state["ipv6"])
         assert address6(rebound) == state["ipv6"]
         assert rebound[2] == server
-    check_options(reply4, reply6, dns4)
+    check_options(reply4, reply6, dns4, dns6)
     print(state["ipv4"], state["ipv6"])
 
 
@@ -237,4 +237,4 @@ if __name__ == "__main__":
     elif action == "upstream":
         scoped_upstream()
     else:
-        lease(action, sys.argv[2], sys.argv[3])
+        lease(action, sys.argv[2], sys.argv[3], sys.argv[4] if len(sys.argv) > 4 else SERVER6)

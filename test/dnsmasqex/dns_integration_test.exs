@@ -115,11 +115,18 @@ defmodule Dnsmasqex.DNSIntegrationTest do
       Config.conf_path(tmpdir, ifname)
     ]
 
-    start_supervised!({Daemon, ifname: ifname, command: "dnsmasq", args: args,
-      config_path: Config.conf_path(tmpdir, ifname), pid_path: Config.pid_path(tmpdir, ifname),
-      required_features: Config.required_features(config),
-      runtime_files: Enum.map(Config.runtime_options(), &{&1, Config.runtime_path(&1, tmpdir, ifname)}),
-      opts: [stderr_to_stdout: true, log_output: :debug]})
+    start_supervised!(
+      {Daemon,
+       ifname: ifname,
+       command: "dnsmasq",
+       args: args,
+       config_path: Config.conf_path(tmpdir, ifname),
+       pid_path: Config.pid_path(tmpdir, ifname),
+       required_features: Config.required_features(config),
+       runtime_files:
+         Enum.map(Config.runtime_options(), &{&1, Config.runtime_path(&1, tmpdir, ifname)}),
+       opts: [stderr_to_stdout: true, log_output: :debug]}
+    )
 
     %{port: port, ifname: ifname, config: config, socket: socket}
   end
