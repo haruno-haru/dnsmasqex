@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## v0.1.2
 
 * Support advanced native dnsmasq policies through a validated directive catalog:
   DNSSEC, filtering, cache and forwarding controls, tagged DHCP, multiple pools,
