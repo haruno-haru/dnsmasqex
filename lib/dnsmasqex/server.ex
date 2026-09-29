@@ -11,6 +11,7 @@ defmodule Dnsmasqex.Server do
 
   alias Dnsmasqex.Config
   alias Dnsmasqex.Daemon
+  alias Dnsmasqex.Directives
   alias Dnsmasqex.IPv6
   alias Dnsmasqex.Preflight
 
@@ -144,9 +145,20 @@ defmodule Dnsmasqex.Server do
     do: {:error, :dhcpv6_disabled}
 
   defp change(option, [value], state) when option in [:dhcp_hosts, :dhcp_options] do
-    if Config.dhcp_services?(state.config.dnsmasq),
-      do: {:ok, option, normalize(state, option, value)},
-      else: {:error, :dhcp_disabled}
+    original = state.config.dnsmasq
+    normalized = normalize(state, option, value)
+    updated = Map.put(original, option, normalized)
+
+    cond do
+      not Config.dhcp_services?(original) ->
+        {:error, :dhcp_disabled}
+
+      Config.dhcp_enabled?(original) != Config.dhcp_enabled?(updated) ->
+        {:error, :requires_interface_reconfiguration}
+
+      true ->
+        {:ok, option, normalized}
+    end
   end
 
   defp change(:directives, [value], state) do
@@ -156,7 +168,11 @@ defmodule Dnsmasqex.Server do
     updated = next.dnsmasq
 
     if Config.dhcp_services?(original) != Config.dhcp_services?(updated) or
+         Config.dhcp_enabled?(original) != Config.dhcp_enabled?(updated) or
+         IPv6.dhcp_enabled?(original) != IPv6.dhcp_enabled?(updated) or
          IPv6.ra_enabled?(original) != IPv6.ra_enabled?(updated) or
+         Directives.enabled?(original.directives, :dhcp_range) !=
+           Directives.enabled?(normalized, :dhcp_range) or
          Keyword.get_values(original.directives, :user) != Keyword.get_values(normalized, :user),
        do: {:error, :requires_interface_reconfiguration},
        else: {:ok, :directives, normalized}

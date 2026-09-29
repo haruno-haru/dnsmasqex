@@ -139,12 +139,18 @@ defmodule Dnsmasqex.DNSIntegrationTest do
     assert after_query.servers != []
   end
 
-  test "falls back to TCP when the custom upstream truncates UDP", %{tmp_dir: tmpdir} do
+  test "a truncated upstream UDP response can be retried over TCP", %{tmp_dir: tmpdir} do
     upstream = start_supervised!({DNSStub, owner: self(), truncate_udp: true})
     upstream_port = DNSStub.port(upstream)
     %{port: port} = start_dnsmasq(tmpdir, false, %{name_servers: ["127.0.0.1##{upstream_port}"]})
     assert eventually_resolve("esp32.lan", :a, port, 30) == [{192, 168, 24, 100}]
-    assert resolve("large.example", :a, port) == [{203, 0, 113, 9}]
+    query = <<123, 46, 1, 0, 0, 1, 0, 0, 0, 0, 0, 0, 5, "large", 7, "example", 0, 0, 1, 0, 1>>
+    {:ok, socket} = :gen_udp.open(0, [:binary, :inet6, active: false])
+    on_exit(fn -> :gen_udp.close(socket) end)
+    :ok = :gen_udp.send(socket, @loopback, port, query)
+    assert {:ok, {_, ^port, <<123, 46, flags::16, _::binary>>}} = :gen_udp.recv(socket, 0, 2000)
+    assert Bitwise.band(flags, 0x0200) != 0
+    assert resolve("large.example", :a, port, true) == [{203, 0, 113, 9}]
     assert_receive {:upstream_query, :udp, _, :a}
     assert_receive {:upstream_query, :tcp, _, :a}
   end

@@ -373,6 +373,7 @@ defmodule Dnsmasqex.NetworkIntegrationTest do
   defp start_server(context, mode, extra \\ %{}) do
     ifname = Map.get(context, :ifname, @ifname)
     server4 = Map.get(context, :server4, "192.0.2.1")
+    {:ok, address4} = VintageNet.IP.ip_to_tuple(server4)
 
     range =
       if mode in [:stateful, :slaac],
@@ -389,7 +390,7 @@ defmodule Dnsmasqex.NetworkIntegrationTest do
 
     config =
       %{
-        ipv4: %{method: :static, address: server4, prefix_length: 24},
+        ipv4: %{method: :static, address: address4, prefix_length: 24},
         ipv6:
           Map.get(context, :ipv6, %{
             method: :static,

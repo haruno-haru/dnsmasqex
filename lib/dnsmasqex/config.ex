@@ -1071,16 +1071,23 @@ defmodule Dnsmasqex.Config do
   def dhcp_enabled?(%{hosts_dir: _}), do: true
   def dhcp_enabled?(%{static_leases: [_ | _]}), do: true
 
-  def dhcp_enabled?(dnsmasq),
-    do:
-      Map.get(dnsmasq, :dhcp_hosts, []) != [] or
-        Directives.dhcp?(Map.get(dnsmasq, :directives, []))
+  def dhcp_enabled?(dnsmasq) do
+    directives = Map.get(dnsmasq, :directives, [])
+
+    if Directives.enabled?(directives, :dhcp_range) do
+      Enum.any?(Directives.ranges(directives, :inet), &(Enum.at(&1, 1) != "proxy"))
+    else
+      hosts = Map.get(dnsmasq, :dhcp_hosts, []) ++ Keyword.get_values(directives, :dhcp_host)
+      Enum.any?(hosts, &(not String.contains?(&1, "[")))
+    end
+  end
 
   @doc false
   @spec dhcp_services?(map()) :: boolean()
   def dhcp_services?(dnsmasq),
     do:
-      dhcp_enabled?(dnsmasq) or Map.has_key?(dnsmasq, :dhcpv6) or
+      dhcp_enabled?(dnsmasq) or Directives.dhcp?(Map.get(dnsmasq, :directives, [])) or
+        Map.has_key?(dnsmasq, :dhcpv6) or
         Map.get(dnsmasq, :options, %{}) != %{} or Map.get(dnsmasq, :dhcp_options, []) != [] or
         Directives.enabled?(Map.get(dnsmasq, :directives, []), :enable_tftp)
 

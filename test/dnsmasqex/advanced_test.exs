@@ -192,6 +192,25 @@ defmodule Dnsmasqex.AdvancedTest do
     refute IPv6.native_ranges?(%{directives: [dhcp_range: "tag:esp,192.0.2.2,192.0.2.9"]})
   end
 
+  test "relay and boot policies do not silently create a local IPv4 allocation pool", %{
+    tmp_dir: tmpdir
+  } do
+    for directives <- [
+          [dhcp_relay: "192.0.2.1,192.0.2.254"],
+          [enable_tftp: true, dhcp_boot: "boot.img"],
+          [dhcp_range: "192.0.2.0,proxy"]
+        ] do
+      config = Config.normalize(%{@base | dnsmasq: %{directives: directives}})
+      refute Config.dhcp_enabled?(config.dnsmasq)
+      assert Config.dhcp_services?(config.dnsmasq)
+      refute elem(hd(raw(config, tmpdir).files), 1) =~ "dhcp-range="
+    end
+
+    config = Config.normalize(%{@base | dnsmasq: %{dhcp_hosts: ["id:01:02:03,192.0.2.100"]}})
+    assert Config.dhcp_enabled?(config.dnsmasq)
+    assert elem(hd(raw(config, tmpdir).files), 1) =~ "dhcp-range=192.0.2.0,static"
+  end
+
   @tag :dnsmasq
   test "the system parser checks native policies, records, and boot configuration together", %{
     tmp_dir: tmpdir

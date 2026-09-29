@@ -518,6 +518,24 @@ defmodule DnsmasqexTest do
       assert :ok = ioctl(:add_record, [{"pi.lan", "192.168.24.1"}])
     end
 
+    test "requires reconfiguration when a relay becomes an address server" do
+      stop_supervised!(Server)
+
+      start_server(%{
+        @config
+        | dnsmasq: %{directives: [dhcp_relay: "192.168.24.1,192.168.24.254"]}
+      })
+
+      assert {:error, :requires_interface_reconfiguration} =
+               ioctl(:dhcp_hosts, [["aa:bb:cc:dd:ee:ff,192.168.24.100"]])
+
+      assert {:error, :requires_interface_reconfiguration} =
+               ioctl(:directives, [[dhcp_range: "192.168.24.100,192.168.24.110"]])
+
+      assert runtime("dhcp_hosts") == []
+      assert runtime("directives") == [dhcp_relay: "192.168.24.1,192.168.24.254"]
+    end
+
     test "adds, puts and removes records by name", context do
       assert :ok = ioctl(:add_record, [{"pi.lan", ["192.168.24.1", "fd00::1"]}])
 

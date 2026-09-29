@@ -86,14 +86,8 @@ defmodule Dnsmasqex.IPv6 do
   @spec native_ranges?(map()) :: boolean()
   def native_ranges?(dnsmasq), do: native_ranges(dnsmasq) != []
 
-  defp native_ranges(dnsmasq) do
-    for range <- Keyword.get_values(Map.get(dnsmasq, :directives, []), :dhcp_range),
-        fields = range |> String.split(",") |> Enum.map(&String.trim/1),
-        fields = Enum.reject(fields, &String.starts_with?(&1, ["tag:", "set:"])),
-        [address | _] <- [fields],
-        ipv6_address?(address),
-        do: fields
-  end
+  defp native_ranges(dnsmasq),
+    do: Directives.ranges(Map.get(dnsmasq, :directives, []), :inet6)
 
   defp ipv6_address?(value),
     do:

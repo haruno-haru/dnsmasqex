@@ -146,6 +146,20 @@ defmodule Dnsmasqex.Directives do
   def enabled?(options, key),
     do: Enum.any?(options, fn {name, value} -> name == key and value != false end)
 
+  @doc false
+  @spec ranges(keyword(), :inet | :inet6) :: [[String.t()]]
+  def ranges(options, family) do
+    size = if family == :inet, do: 4, else: 8
+
+    for range <- Keyword.get_values(options, :dhcp_range),
+        fields = range |> String.split(",") |> Enum.map(&String.trim/1),
+        fields = Enum.drop_while(fields, &(not match?({:ok, _}, VintageNet.IP.ip_to_tuple(&1)))),
+        [first | _] <- [fields],
+        {:ok, address} = VintageNet.IP.ip_to_tuple(first),
+        tuple_size(address) == size,
+        do: fields
+  end
+
   @spec ra?(keyword()) :: boolean()
   def ra?(options) do
     enabled?(options, :enable_ra) or
