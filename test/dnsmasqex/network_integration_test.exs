@@ -354,19 +354,20 @@ defmodule Dnsmasqex.NetworkIntegrationTest do
              1000
            ) == []
 
+    ip(["-n", context.namespace, "addr", "add", "#{address4}/24", "dev", @client])
     assert client(context, ["release", state_path(context), "192.0.2.1"]) == ""
     eventually(fn -> leases() == [] end)
     assert length(VintageNet.get(second_leases)) == 2
   end
 
-  test "serves the same leases after the interface goes down and returns", context do
+  test "retains leases across carrier loss and reconnection", context do
     start_server(context, :stateful)
     addresses = client(context, ["acquire", state_path(context), "192.0.2.1"])
     [address4, _] = String.split(addresses)
     ip(["-n", context.namespace, "addr", "add", "#{address4}/24", "dev", @client])
-    ip(["link", "set", @ifname, "down"])
-    ip(["link", "set", @ifname, "up"])
-    ip(["-6", "addr", "replace", "fe80::1/64", "dev", @ifname, "nodad"])
+    ip(["-n", context.namespace, "link", "set", @client, "down"])
+    ip(["-n", context.namespace, "link", "set", @client, "up"])
+    ip(["-n", context.namespace, "-6", "addr", "replace", "fe80::2/64", "dev", @client, "nodad"])
     assert client(context, ["renew", state_path(context), "192.0.2.1"]) == addresses
   end
 
