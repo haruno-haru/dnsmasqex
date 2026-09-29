@@ -343,6 +343,16 @@ defmodule Dnsmasqex.NetworkIntegrationTest do
                     %Event{name: "add", interface: "dnssrv1", ip: ^second6}, _},
                    3000
 
+    ip(["-n", context.namespace, "addr", "add", "#{address4}/24", "dev", @client])
+    ip(["-n", second.namespace, "addr", "add", "#{second4}/24", "dev", @client])
+
+    # Unicast requests must reach the matching instance, just like broadcasts.
+    assert client(context, ["renew", state_path(context), "192.0.2.1"]) ==
+             "#{address4} #{address6}\n"
+
+    assert client(second, ["renew", state_path(second), "192.0.3.1", "fd34::1"]) ==
+             "#{second4} #{second6}\n"
+
     assert :ok = Server.update(@ifname, :add_record, [{"first-only.lan", "192.0.2.123"}])
     eventually(fn -> resolve("first-only.lan", :a) == [{192, 0, 2, 123}] end)
 
@@ -354,10 +364,12 @@ defmodule Dnsmasqex.NetworkIntegrationTest do
              1000
            ) == []
 
-    ip(["-n", context.namespace, "addr", "add", "#{address4}/24", "dev", @client])
     assert client(context, ["release", state_path(context), "192.0.2.1"]) == ""
     eventually(fn -> leases() == [] end)
     assert length(VintageNet.get(second_leases)) == 2
+
+    assert client(second, ["release", state_path(second), "192.0.3.1"]) == ""
+    eventually(fn -> VintageNet.get(second_leases) == [] end)
   end
 
   test "retains leases across carrier loss and reconnection", context do

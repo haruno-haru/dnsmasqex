@@ -130,9 +130,11 @@ are described in [IPv6 and dual stack](#ipv6-and-dual-stack).
   kernel](#checking-dnsmasq-and-the-kernel)
 * `:listen_mode` - `:addresses` listens only on the configured static addresses.
   `:interface` listens on all addresses of the interface, including link-local
-  IPv6 addresses. Defaults to `:addresses` without router advertisements and
-  `:interface` with them. RA requires `:interface`; combining RA with
-  `:addresses` is rejected
+  IPv6 addresses. Defaults to `:interface` for DHCP allocation or router
+  advertisements, otherwise `:addresses`. Multiple DHCP instances must use
+  `:interface` so unicast renewals and releases reach the correct instance.
+  Explicit `:addresses` is suitable for DNS-only use or a single DHCP instance.
+  RA requires `:interface`; combining RA with `:addresses` is rejected
 
 Don't combine `:dnsmasq` with `:dhcpd` or `:dnsd` on the same interface.
 Unknown `:dnsmasq` keys raise an error instead of being ignored.

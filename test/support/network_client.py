@@ -71,7 +71,8 @@ def dhcp4(message, address="0.0.0.0", requested=None, server=None, expected=5, v
             sock.sendto(packet, (SERVER4 if message == 7 else "255.255.255.255", 67))
             return None
         try:
-            answer = exchange(sock, packet, ("255.255.255.255", 67),
+            destination = SERVER4 if message == 3 and address != "0.0.0.0" else "255.255.255.255"
+            answer = exchange(sock, packet, (destination, 67),
                               lambda data: len(data) >= 240 and data[0] == 2 and data[4:8] == transaction,
                               attempts=3 if expected is None else 20)
         except AssertionError:

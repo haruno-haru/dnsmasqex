@@ -90,7 +90,8 @@ defmodule Dnsmasqex.Config do
     `inotify` in `Dnsmasqex.capabilities/0`
   * `:listen_mode` - `:addresses` listens on the configured static addresses;
     `:interface` listens on all addresses of the interface. Defaults to
-    `:addresses` unless router advertisements are enabled, which require
+    `:interface` for DHCP allocation or router advertisements, otherwise
+    `:addresses`. Multiple DHCP instances and router advertisements require
     `:interface`
   * `:port` - DNS port, 0..65535; 0 disables DNS while retaining DHCP/TFTP
   * `:cache_size`, `:dns_forward_max`, `:dhcp_lease_max` - native resource limits
@@ -319,7 +320,10 @@ defmodule Dnsmasqex.Config do
 
   defp normalize_listen_mode(dnsmasq) do
     ra? = IPv6.ra_enabled?(dnsmasq)
-    mode = Map.get(dnsmasq, :listen_mode, if(ra?, do: :interface, else: :addresses))
+    dhcp? = dhcp_enabled?(dnsmasq) or IPv6.dhcp_enabled?(dnsmasq)
+    # A single explicit interface lets dnsmasq bind DHCP sockets to that device.
+    # Address-only listeners can lose unicast packets to another DHCP instance.
+    mode = Map.get(dnsmasq, :listen_mode, if(ra? or dhcp?, do: :interface, else: :addresses))
 
     if mode not in [:addresses, :interface],
       do: raise(ArgumentError, "dnsmasq :listen_mode must be :addresses or :interface")

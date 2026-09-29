@@ -79,9 +79,10 @@ defmodule DnsmasqexTest do
            ] = raw_config.files
 
     assert contents == """
+           interface=eth1
            except-interface=lo
            listen-address=192.168.24.1
-           bind-interfaces
+           bind-dynamic
            no-hosts
            resolv-file=/etc/resolv.conf
            user=root

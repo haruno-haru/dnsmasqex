@@ -12,6 +12,30 @@ defmodule Dnsmasqex.ConfigTest do
     dnsmasq: %{}
   }
 
+  test "defaults DHCP allocation to interface listening while preserving explicit address mode" do
+    assert Config.normalize(@config).dnsmasq.listen_mode == :addresses
+
+    for dnsmasq <- [
+          %{start: "192.168.24.10", end: "192.168.24.99"},
+          %{static_leases: [{"aa:bb:cc:dd:ee:ff", "192.168.24.10"}]},
+          %{directives: [dhcp_range: "192.168.24.10,192.168.24.99,600"]},
+          %{dhcpv6: %{start: "fd12::10", end: "fd12::99"}}
+        ] do
+      config =
+        Map.merge(@config, %{
+          ipv6: %{method: :static, address: "fd12::1", prefix_length: 64},
+          dnsmasq: dnsmasq
+        })
+
+      normalized = Config.normalize(config)
+      assert normalized.dnsmasq.listen_mode == :interface
+      assert Config.normalize(normalized) == normalized
+
+      explicit = put_in(config, [:dnsmasq, :listen_mode], :addresses)
+      assert Config.normalize(explicit).dnsmasq.listen_mode == :addresses
+    end
+  end
+
   test "rejects unknown options even when the interface cannot run dnsmasq" do
     for ipv4 <- [@config.ipv4, %{method: :disabled}],
         option <- [:dnssec, :portt, :cache_sizee, :startt] do
