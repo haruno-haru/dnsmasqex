@@ -7,8 +7,11 @@ defmodule Dnsmasqex.Config do
   dnsmasq options for static IPv4, IPv6 and dual-stack interfaces
 
   Set the top-level `:ipv6` to `%{method: :static, address: ip, prefix_length: 64}`
-  to have Dnsmasqex configure an IPv6 address. The wrapped technology manages
-  the link and `:ipv4`. Use `ipv4: %{method: :disabled}` for IPv6 only.
+  to have Dnsmasqex configure an IPv6 address. Optional `:addresses` entries
+  contain `:address` and `:prefix_length` for additional prefixes. Use
+  `%{method: :manual}` with native ranges to follow addresses managed externally.
+  The wrapped technology manages the link and `:ipv4`.
+  Use `ipv4: %{method: :disabled}` for IPv6 only.
   `%{method: :disabled}` leaves IPv6 unmanaged; it does not disable the kernel's
   IPv6 stack. Other IPv6 fields, including routes and resolvers, aren't supported
   and are rejected.

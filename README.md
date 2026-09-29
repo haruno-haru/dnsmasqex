@@ -646,6 +646,9 @@ sudo env "PATH=$PATH" "MIX_HOME=$HOME/.mix" "HEX_HOME=$HOME/.hex" MIX_ENV=test D
 
 They create a separate client namespace connected by a virtual Ethernet pair,
 use the generated configuration and supervised processes, and verify DHCPv4
-and DHCPv6 allocation, renewal, release, live options, lease events, DNS records,
-scoped upstream forwarding and RA flags, prefixes and DNS options. CI runs
-these tests; the ordinary test suite excludes them.
+and DHCPv6 allocation, renewal, release, decline, pool exhaustion, client-ID
+policies, forced options, lease persistence and server DUID stability. They also
+exercise DHCPv6 Confirm, Rapid Commit and temporary addresses, external hosts
+directory updates, TFTP transfers, nftables insertion, custom resolver files,
+scoped upstream forwarding and RA flags, MTU, priority and prefix renumbering.
+CI runs these tests; the ordinary test suite excludes them.

@@ -14,9 +14,10 @@ defmodule Dnsmasqex.IPv6 do
   @ra_modes [:slaac, :stateless, :ra_only]
 
   @type interface :: %{
-          method: :static,
-          address: :inet.ip6_address(),
-          prefix_length: 1..128
+          required(:method) => :static,
+          required(:address) => :inet.ip6_address(),
+          required(:prefix_length) => 1..128,
+          optional(:addresses) => [%{address: :inet.ip6_address(), prefix_length: 1..128}]
         }
 
   @spec normalize(map()) :: map()
@@ -52,7 +53,7 @@ defmodule Dnsmasqex.IPv6 do
     do:
       raise(
         ArgumentError,
-        "Invalid IPv6 interface configuration; expected :static with :address and :prefix_length or :disabled, got: #{inspect(ipv6)}"
+        "Invalid IPv6 interface configuration; expected :static with :address and :prefix_length, :manual or :disabled, got: #{inspect(ipv6)}"
       )
 
   def normalize(config), do: config
@@ -83,14 +84,21 @@ defmodule Dnsmasqex.IPv6 do
   end
 
   @spec native_ranges?(map()) :: boolean()
-  def native_ranges?(dnsmasq) do
-    Enum.any?(Keyword.get_values(Map.get(dnsmasq, :directives, []), :dhcp_range), fn range ->
-      range
-      |> String.split(",")
-      |> Enum.reject(&String.starts_with?(&1, ["tag:", "set:"]))
-      |> Enum.any?(&String.contains?(&1, ":"))
-    end)
+  def native_ranges?(dnsmasq), do: native_ranges(dnsmasq) != []
+
+  defp native_ranges(dnsmasq) do
+    for range <- Keyword.get_values(Map.get(dnsmasq, :directives, []), :dhcp_range),
+        fields = range |> String.split(",") |> Enum.map(&String.trim/1),
+        fields = Enum.reject(fields, &String.starts_with?(&1, ["tag:", "set:"])),
+        [address | _] <- [fields],
+        ipv6_address?(address),
+        do: fields
   end
+
+  defp ipv6_address?(value),
+    do:
+      String.contains?(value, ":") and
+        match?({:ok, _}, :inet.parse_ipv6_address(String.to_charlist(value)))
 
   @spec interface(map()) :: interface() | nil
   def interface(%{ipv6: %{method: :static} = ipv6}), do: ipv6
@@ -365,7 +373,13 @@ defmodule Dnsmasqex.IPv6 do
 
   @spec dhcp_enabled?(map()) :: boolean()
   def dhcp_enabled?(%{dhcpv6: %{mode: mode}}), do: mode in [:stateful, :static, :slaac]
-  def dhcp_enabled?(dnsmasq), do: native_ranges?(dnsmasq)
+
+  def dhcp_enabled?(dnsmasq) do
+    Enum.any?(native_ranges(dnsmasq), fn fields ->
+      "ra-stateless" not in fields and
+        ("static" in fields or (match?([_, _ | _], fields) and ipv6_address?(Enum.at(fields, 1))))
+    end)
+  end
 
   @spec ra_enabled?(map()) :: boolean()
   def ra_enabled?(dnsmasq),

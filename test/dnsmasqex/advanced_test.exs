@@ -5,7 +5,7 @@
 defmodule Dnsmasqex.AdvancedTest do
   use ExUnit.Case, async: true
 
-  alias Dnsmasqex.{Config, Directives, Event, Leases, Notifications, Preflight, Upstream}
+  alias Dnsmasqex.{Config, Directives, Event, IPv6, Leases, Notifications, Preflight, Upstream}
   alias VintageNet.Interface.RawConfig
 
   @moduletag :tmp_dir
@@ -164,6 +164,32 @@ defmodule Dnsmasqex.AdvancedTest do
     assert_raise ArgumentError, fn ->
       Config.normalize(%{@base | dnsmasq: %{upstreams: [cache_size: 10]}})
     end
+  end
+
+  test "native advertisement and stateless ranges cannot accept stateful reservations" do
+    for range <- ["fd12::,ra-only,64", "tag:esp,fd12::,ra-stateless,64", "fd12::,ra-names,64"] do
+      dnsmasq = %{directives: [dhcp_range: range]}
+      assert IPv6.native_ranges?(dnsmasq)
+      refute IPv6.dhcp_enabled?(dnsmasq)
+
+      assert_raise ArgumentError, ~r/static leases need stateful/, fn ->
+        Config.normalize(%{
+          ipv6: %{method: :static, address: "fd12::1", prefix_length: 64},
+          dnsmasq:
+            Map.put(dnsmasq, :static_leases6, [%{duid: "00:03:00:01:02:03", ip: "fd12::100"}])
+        })
+      end
+    end
+
+    for range <- [
+          "fd12::,static,64",
+          "tag:esp,fd12::100,fd12::110,slaac,64",
+          "::100,::110,constructor:eth1"
+        ] do
+      assert IPv6.dhcp_enabled?(%{directives: [dhcp_range: range]})
+    end
+
+    refute IPv6.native_ranges?(%{directives: [dhcp_range: "tag:esp,192.0.2.2,192.0.2.9"]})
   end
 
   @tag :dnsmasq

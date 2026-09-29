@@ -34,9 +34,9 @@ def option6(code, data):
     return struct.pack("!HH", code, len(data)) + data
 
 
-def exchange(sock, packet, destination, matches):
+def exchange(sock, packet, destination, matches, attempts=20):
     sock.settimeout(0.4)
-    for _ in range(20):
+    for _ in range(attempts):
         sock.sendto(packet, destination)
         try:
             while True:
@@ -70,8 +70,15 @@ def dhcp4(message, address="0.0.0.0", requested=None, server=None, expected=5, v
         if message in (4, 7):
             sock.sendto(packet, (SERVER4 if message == 7 else "255.255.255.255", 67))
             return None
-        answer = exchange(sock, packet, ("255.255.255.255", 67),
-                          lambda data: len(data) >= 240 and data[0] == 2 and data[4:8] == transaction)
+        try:
+            answer = exchange(sock, packet, ("255.255.255.255", 67),
+                              lambda data: len(data) >= 240 and data[0] == 2 and data[4:8] == transaction,
+                              attempts=3 if expected is None else 20)
+        except AssertionError:
+            if expected is None:
+                return None
+            raise
+        assert expected is not None, "Unexpected DHCP offer"
     result = {}
     data = answer[240:]
     while data and data[0] != 255:
@@ -277,6 +284,47 @@ def tftp(filename, expected):
         client.sendto(b"\x00\x04\x00\x01", sender)
 
 
+def reservation4(expected):
+    offered, offer = dhcp4(1, expected=2)
+    assert offered == expected, (offered, expected)
+    address, _ = dhcp4(3, requested=offered, server=socket.inet_ntoa(offer[54]))
+    assert address == expected
+    dhcp4(7, address=address, server=socket.inet_ntoa(offer[54]))
+
+
+def exhausted4():
+    global MAC
+    offered, offer = dhcp4(1, expected=2)
+    address, _ = dhcp4(3, requested=offered, server=socket.inet_ntoa(offer[54]))
+    assert address == "192.0.2.100"
+    MAC = bytes.fromhex("020000000003")
+    assert dhcp4(1, expected=None) is None
+
+
+def prefixes(expected):
+    wanted = {socket.inet_pton(socket.AF_INET6, prefix) for prefix in expected.split(",")}
+
+    def active_prefixes(packet):
+        found = set()
+        data = packet[16:]
+        while len(data) >= 2 and data[1] > 0:
+            size = data[1] * 8
+            if data[0] == 3 and size == 32 and struct.unpack("!I", data[8:12])[0] > 0:
+                found.add(data[16:32])
+            data = data[size:]
+        return found
+
+    index = socket.if_nametoindex(IFACE)
+    with socket.socket(socket.AF_INET6, socket.SOCK_RAW, socket.IPPROTO_ICMPV6) as sock:
+        sock.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_MULTICAST_IF, index)
+        sock.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_MULTICAST_HOPS, 255)
+        sock.bind(("fe80::2", 0, 0, index))
+        answer = exchange(sock, bytes([133]) + bytes(7), ("ff02::2", 0, 0, index),
+                          lambda data: len(data) >= 16 and data[0] == 134 and active_prefixes(data) == wanted)
+    assert answer[5] & 0x18 == 0x08, "RA preference must be high"
+    assert b"\x05\x01\x00\x00\x00\x00\x05\x78" in answer[16:], "RA MTU must be 1400"
+
+
 if __name__ == "__main__":
     action = sys.argv[1]
     if action == "ra":
@@ -293,5 +341,13 @@ if __name__ == "__main__":
         decline4()
     elif action == "tftp":
         tftp(sys.argv[2], sys.argv[3])
+    elif action == "reservation4":
+        reservation4(sys.argv[2])
+    elif action == "no-offer4":
+        assert dhcp4(1, expected=None) is None
+    elif action == "exhausted4":
+        exhausted4()
+    elif action == "prefixes":
+        prefixes(sys.argv[2])
     else:
         lease(action, sys.argv[2], sys.argv[3], sys.argv[4] if len(sys.argv) > 4 else SERVER6)

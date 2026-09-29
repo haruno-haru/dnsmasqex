@@ -151,7 +151,7 @@ defmodule Dnsmasqex.Server do
 
   defp change(:directives, [value], state) do
     normalized = Config.normalize_value(state.config, :directives, value)
-    next = put_in(state.config.dnsmasq.directives, normalized)
+    next = put_in(state.config, [:dnsmasq, :directives], normalized)
     original = state.config.dnsmasq
     updated = next.dnsmasq
 
@@ -386,11 +386,9 @@ defmodule Dnsmasqex.Server do
   defp hangup(pid), do: send_signal(pid, "HUP")
 
   defp send_signal(pid, signal) do
-    case MuonTrap.cmd("kill", ["-#{signal}", Integer.to_string(pid)],
-           stderr_to_stdout: true,
-           timeout: 1_000
-         ) do
+    case Dnsmasqex.Command.run("kill", ["-#{signal}", Integer.to_string(pid)], 1_000) do
       {_output, 0} -> :ok
+      {:error, reason} -> {:error, inspect(reason)}
       {output, _status} -> {:error, String.trim(output)}
     end
   end

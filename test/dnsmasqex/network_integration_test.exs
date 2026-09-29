@@ -247,6 +247,57 @@ defmodule Dnsmasqex.NetworkIntegrationTest do
     end
   end
 
+  test "does not offer an occupied address when the IPv4 pool is exhausted", context do
+    start_server(context, :stateful, %{start: "192.0.2.100", end: "192.0.2.100"})
+    assert client(context, ["exhausted4"]) == ""
+  end
+
+  test "loads new reservation files and reloads edits and removals", context do
+    directory = Path.join(context.tmp_dir, "hosts")
+
+    start_server(context, :native, %{
+      hosts_dir: directory,
+      directives: [
+        dhcp_range: "192.0.2.0,static,600",
+        dhcp_range: "fd12:3456:789a:1::100,fd12:3456:789a:1::110,64,600"
+      ]
+    })
+
+    path = Path.join(directory, "esp32")
+    File.write!(path, "02:00:00:00:00:02,192.0.2.120,600\n")
+    assert client(context, ["reservation4", "192.0.2.120"]) == ""
+    eventually(fn -> leases() == [] end)
+    File.write!(path, "02:00:00:00:00:02,192.0.2.121,600\n")
+    assert :ok = Server.reload(@ifname)
+    assert client(context, ["reservation4", "192.0.2.121"]) == ""
+    eventually(fn -> leases() == [] end)
+    File.rm!(path)
+    assert :ok = Server.reload(@ifname)
+    assert client(context, ["no-offer4"]) == ""
+  end
+
+  test "advertises multiple constructed prefixes and follows interface renumbering", context do
+    ipv6 = %{
+      method: :static,
+      address: "fd12:3456:789a:1::1",
+      prefix_length: 64,
+      addresses: [%{address: "fd34::1", prefix_length: 64}]
+    }
+
+    start_server(Map.put(context, :ipv6, ipv6), :native, %{
+      directives: [
+        dhcp_range: "192.0.2.100,192.0.2.110,255.255.255.0,600",
+        dhcp_range: "::100,::1ff,constructor:dnssrv0,slaac,64,600",
+        ra_param: "dnssrv0,mtu:1400,high,10,0"
+      ]
+    })
+
+    assert client(context, ["prefixes", "fd12:3456:789a:1::,fd34::"]) == ""
+    ip(["-6", "addr", "del", "fd34::1/64", "dev", @ifname])
+    ip(["-6", "addr", "add", "fd56::1/64", "dev", @ifname, "nodad"])
+    assert client(context, ["prefixes", "fd12:3456:789a:1::,fd56::"]) == ""
+  end
+
   defp start_server(context, mode, extra \\ %{}) do
     range =
       if mode in [:stateful, :slaac],
@@ -262,9 +313,14 @@ defmodule Dnsmasqex.NetworkIntegrationTest do
         else: defaults
 
     config =
-      Config.normalize(%{
+      %{
         ipv4: %{method: :static, address: {192, 0, 2, 1}, prefix_length: 24},
-        ipv6: %{method: :static, address: "fd12:3456:789a:1::1", prefix_length: 64},
+        ipv6:
+          Map.get(context, :ipv6, %{
+            method: :static,
+            address: "fd12:3456:789a:1::1",
+            prefix_length: 64
+          }),
         dnsmasq:
           Map.merge(
             %{
@@ -279,7 +335,14 @@ defmodule Dnsmasqex.NetworkIntegrationTest do
             },
             Map.merge(defaults, extra)
           )
-      })
+      }
+
+    config =
+      if mode == :native,
+        do: update_in(config.dnsmasq, &Map.drop(&1, [:start, :end, :dhcpv6])),
+        else: config
+
+    config = Config.normalize(config)
 
     raw =
       Config.add_config(

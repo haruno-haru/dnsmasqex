@@ -151,17 +151,12 @@ defmodule Dnsmasqex.Preflight do
 
     with :ok <- File.write(path, contents, [:exclusive]) do
       try do
-        case MuonTrap.cmd(command, args ++ ["--conf-file=#{path}"],
-               stderr_to_stdout: true,
-               env: [{"LC_ALL", "C"}],
-               timeout: timeout
-             ) do
+        case Dnsmasqex.Command.run(command, args ++ ["--conf-file=#{path}"], timeout) do
           {_output, 0} -> :ok
           {_output, :timeout} -> {:error, :preflight_timeout}
+          {:error, reason} -> {:error, {:executable, command, reason}}
           {output, _status} -> {:error, {:invalid_configuration, String.trim(output)}}
         end
-      rescue
-        error in ErlangError -> {:error, {:executable, command, error.original}}
       after
         File.rm(path)
       end

@@ -139,16 +139,14 @@ defmodule Dnsmasqex do
 
       path ->
         path
-        |> MuonTrap.cmd(["--version"],
-          stderr_to_stdout: true,
-          env: [{"LC_ALL", "C"}],
-          timeout: timeout
-        )
+        |> Dnsmasqex.Command.run(["--version"], timeout)
         |> parse_version()
     end
   rescue
-    error in ErlangError -> {:error, "Can't execute #{dnsmasq}: #{inspect(error.original)}"}
+    error in ErlangError -> {:error, "Can't execute #{dnsmasq}: #{Exception.message(error)}"}
   end
+
+  defp parse_version({:error, reason}), do: {:error, "Can't execute dnsmasq: #{inspect(reason)}"}
 
   defp parse_version({output, 0}) do
     with [_, version] <- Regex.run(~r/^Dnsmasq version (\S+)/m, output),
