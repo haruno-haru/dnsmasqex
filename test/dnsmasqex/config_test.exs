@@ -14,7 +14,7 @@ defmodule Dnsmasqex.ConfigTest do
 
   test "rejects unknown options even when the interface cannot run dnsmasq" do
     for ipv4 <- [@config.ipv4, %{method: :disabled}],
-        option <- [:dnssec, :port, :cache_size, :startt] do
+        option <- [:dnssec, :portt, :cache_sizee, :startt] do
       assert_raise ArgumentError, ~r/Unsupported dnsmasq options/, fn ->
         Config.normalize(%{ipv4: ipv4, dnsmasq: %{option => true}})
       end

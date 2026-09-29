@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+* Support advanced native dnsmasq policies through a validated directive catalog:
+  DNSSEC, filtering, cache and forwarding controls, tagged DHCP, multiple pools,
+  IPv6 prefix constructors, RA parameters, DNS records and authoritative zones,
+  TFTP/PXE, relay, lease queries, sets and optional system bus integration.
+* Add configurable DNS and upstream ports, source selection, resource limits,
+  multiple static IPv6 addresses and externally managed IPv6 interfaces.
+* Reload native upstream, reservation and option files; validate complete native
+  configuration replacements before restarting the daemon and publish update state.
+* Follow VintageNet's resolver file path, correctly identify duration-format leases
+  on no-RTC builds, retain client IDs and expose additional event metadata.
+* Bound validation and startup readiness, retain numeric exit status, allow daemon
+  credential selection, and expose native cache/upstream statistics.
+* Check external DHCP directories before startup and expand protocol tests for
+  DNS records, cache behavior, TCP fallback, DHCP recovery, TFTP and nftables.
+
 * Validate required system dnsmasq features and generated configuration before
   startup, and validate runtime DHCP files before accepting updates.
 * Publish daemon startup, failure, retry and running states with a verified PID.

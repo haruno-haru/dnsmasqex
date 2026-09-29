@@ -58,11 +58,23 @@ defmodule Dnsmasqex do
     run_ioctl(ifname, command, args, VintageNet.get_configuration(ifname))
   end
 
+  @doc """
+  Read cache and upstream counters from the daemon on an interface.
+
+  `timeout` bounds each DNS request in milliseconds. For an interface whose
+  addresses are managed externally, use `Dnsmasqex.Statistics.query/2` with
+  the desired address and port.
+  """
+  @spec statistics(VintageNet.ifname(), pos_integer()) :: {:ok, map()} | {:error, term()}
+  def statistics(ifname, timeout \\ 1_000) do
+    with {:ok, endpoint} <- Server.dns_endpoint(ifname),
+         do: Dnsmasqex.Statistics.query(endpoint, timeout)
+  end
+
   @impl VintageNet.Technology
   def check_system(_opts) do
     case capabilities() do
-      {:ok, %{dhcp: true, scripts: true}} -> :ok
-      {:ok, _} -> {:error, "#{Config.dnsmasq_path()} was built without DHCP or script support"}
+      {:ok, _} -> :ok
       error -> error
     end
   end
@@ -72,6 +84,7 @@ defmodule Dnsmasqex do
   """
   @type capabilities :: %{
           version: String.t(),
+          lease_time_format: :expiry | :duration,
           ipv6: boolean(),
           dhcp: boolean(),
           dhcpv6: boolean(),
@@ -118,15 +131,19 @@ defmodule Dnsmasqex do
   For example, `:nftset` must be `true` to use the `:nftsets` option, and
   `:dnssec` to validate DNSSEC.
   """
-  @spec capabilities(String.t()) :: {:ok, capabilities()} | {:error, String.t()}
-  def capabilities(dnsmasq \\ Config.dnsmasq_path()) do
+  @spec capabilities(String.t(), timeout()) :: {:ok, capabilities()} | {:error, String.t()}
+  def capabilities(dnsmasq \\ Config.dnsmasq_path(), timeout \\ 5_000) do
     case System.find_executable(dnsmasq) do
       nil ->
         {:error, "Can't find #{dnsmasq}"}
 
       path ->
         path
-        |> System.cmd(["--version"], stderr_to_stdout: true, env: [{"LC_ALL", "C"}])
+        |> MuonTrap.cmd(["--version"],
+          stderr_to_stdout: true,
+          env: [{"LC_ALL", "C"}],
+          timeout: timeout
+        )
         |> parse_version()
     end
   rescue
@@ -143,12 +160,18 @@ defmodule Dnsmasqex do
           {feature, Enum.any?(names, &(&1 in options))}
         end)
 
-      {:ok, Map.merge(features, %{version: version, scripts: "no-scripts" not in options})}
+      {:ok,
+       Map.merge(features, %{
+         version: version,
+         scripts: "no-scripts" not in options,
+         lease_time_format: if("no-RTC" in options, do: :duration, else: :expiry)
+       })}
     else
       _ -> {:error, "Unexpected dnsmasq --version output: #{inspect(output)}"}
     end
   end
 
+  defp parse_version({_output, :timeout}), do: {:error, "dnsmasq --version timed out"}
   defp parse_version({output, _status}), do: {:error, String.trim(output)}
 
   @doc """
@@ -196,10 +219,16 @@ defmodule Dnsmasqex do
     :delete_option,
     :options6,
     :put_option6,
-    :delete_option6
+    :delete_option6,
+    :directives,
+    :upstreams,
+    :dhcp_hosts,
+    :dhcp_options
   ]
 
   defp run_ioctl(ifname, :reload, _args, %{dnsmasq: _}), do: Server.reload(ifname)
+
+  defp run_ioctl(ifname, :dump_stats, [], %{dnsmasq: _}), do: Server.dump_stats(ifname)
 
   defp run_ioctl(ifname, command, args, %{dnsmasq: _}) when command in @server_commands,
     do: Server.update(ifname, command, args)

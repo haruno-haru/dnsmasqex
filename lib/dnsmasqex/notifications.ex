@@ -30,7 +30,7 @@ defmodule Dnsmasqex.Notifications do
     end
 
     if event.name in @lease_actions do
-      Leases.update(context.ifname, context.lease_path)
+      Leases.update(context.ifname, context.lease_path, event)
     end
 
     :ok

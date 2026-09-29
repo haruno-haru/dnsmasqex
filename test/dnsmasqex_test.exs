@@ -58,7 +58,11 @@ defmodule DnsmasqexTest do
              "/tmp/vintage_net/dnsmasq.eth1.options.new",
              "/tmp/vintage_net/dnsmasq.eth1.records.new",
              "/tmp/vintage_net/dnsmasq.eth1.hosts6.new",
-             "/tmp/vintage_net/dnsmasq.eth1.options6.new"
+             "/tmp/vintage_net/dnsmasq.eth1.options6.new",
+             "/tmp/vintage_net/dnsmasq.eth1.native.new",
+             "/tmp/vintage_net/dnsmasq.eth1.servers.new",
+             "/tmp/vintage_net/dnsmasq.eth1.native-hosts.new",
+             "/tmp/vintage_net/dnsmasq.eth1.native-options.new"
            ]
 
     assert [
@@ -67,7 +71,11 @@ defmodule DnsmasqexTest do
              {"/tmp/vintage_net/dnsmasq.eth1.options", options},
              {"/tmp/vintage_net/dnsmasq.eth1.records", records},
              {"/tmp/vintage_net/dnsmasq.eth1.hosts6", ""},
-             {"/tmp/vintage_net/dnsmasq.eth1.options6", ""}
+             {"/tmp/vintage_net/dnsmasq.eth1.options6", ""},
+             {"/tmp/vintage_net/dnsmasq.eth1.native", ""},
+             {"/tmp/vintage_net/dnsmasq.eth1.servers", ""},
+             {"/tmp/vintage_net/dnsmasq.eth1.native-hosts", ""},
+             {"/tmp/vintage_net/dnsmasq.eth1.native-options", ""}
            ] = raw_config.files
 
     assert contents == """
@@ -75,17 +83,22 @@ defmodule DnsmasqexTest do
            listen-address=192.168.24.1
            bind-interfaces
            no-hosts
+           resolv-file=/etc/resolv.conf
            user=root
            pid-file=/tmp/vintage_net/dnsmasq.eth1.pid
            dhcp-leasefile=/tmp/vintage_net/dnsmasq.eth1.leases
            dhcp-script=#{BEAMNotify.bin_path()}
            script-arp
            script-on-renewal
-           dhcp-range=192.168.24.10,192.168.24.99,3600
            dhcp-hostsfile=/tmp/vintage_net/dnsmasq.eth1.hosts
            dhcp-optsfile=/tmp/vintage_net/dnsmasq.eth1.options
            dhcp-hostsfile=/tmp/vintage_net/dnsmasq.eth1.hosts6
            dhcp-optsfile=/tmp/vintage_net/dnsmasq.eth1.options6
+           dhcp-hostsfile=/tmp/vintage_net/dnsmasq.eth1.native-hosts
+           dhcp-optsfile=/tmp/vintage_net/dnsmasq.eth1.native-options
+           dhcp-range=192.168.24.10,192.168.24.99,3600
+           conf-file=/tmp/vintage_net/dnsmasq.eth1.native
+           servers-file=/tmp/vintage_net/dnsmasq.eth1.servers
            dhcp-hostsdir=/data/dnsmasq/hosts
            addn-hosts=/tmp/vintage_net/dnsmasq.eth1.records
            """
@@ -153,7 +166,7 @@ defmodule DnsmasqexTest do
   end
 
   test "follows /etc/resolv.conf unless name servers are set" do
-    refute dnsmasq_conf(@config) =~ "resolv"
+    assert dnsmasq_conf(@config) =~ "resolv-file=/etc/resolv.conf\n"
 
     contents =
       dnsmasq_conf(%{
@@ -252,7 +265,8 @@ defmodule DnsmasqexTest do
     [{_path, contents} | _] = raw_config.files
 
     assert contents =~ "dhcp-leasefile=/data/dnsmasq/eth1.leases\n"
-    assert contents =~ "script-on-renewal\ndhcp-authoritative\n"
+    assert contents =~ "script-on-renewal\n"
+    assert contents =~ "dhcp-authoritative\n"
 
     assert raw_config.up_cmds == [
              :wired_up,
@@ -653,6 +667,7 @@ defmodule DnsmasqexTest do
                {:ok,
                 %{
                   version: "2.91",
+                  lease_time_format: :expiry,
                   ipv6: true,
                   dhcp: true,
                   dhcpv6: true,
@@ -676,12 +691,13 @@ defmodule DnsmasqexTest do
       assert Dnsmasqex.check_system([]) == :ok
     end
 
-    test "rejects a dnsmasq that can't serve DHCP or run the event script", %{tmp_dir: tmp_dir} do
+    test "accepts minimal builds and leaves feature checks to the actual configuration", %{
+      tmp_dir: tmp_dir
+    } do
       for options <- ["IPv6 no-DHCP no-scripts", "IPv6 DHCP no-DHCPv6 no-scripts", "IPv6 no-DHCP"] do
         fake_dnsmasq(tmp_dir, "Dnsmasq version 2.91\nCompile time options: #{options}\n")
 
-        assert Dnsmasqex.check_system([]) ==
-                 {:error, "#{tmp_dir}/dnsmasq was built without DHCP or script support"}
+        assert Dnsmasqex.check_system([]) == :ok
       end
     end
 
@@ -768,12 +784,14 @@ defmodule DnsmasqexTest do
                leasetime: :infinity,
                lease_nip: "192.168.24.100",
                lease_mac: "aa:bb:cc:dd:ee:ff",
+               lease_client_id: nil,
                hostname: "printer"
              },
              %{
                leasetime: 100,
                lease_nip: "192.168.24.10",
                lease_mac: "aa:bb:cc:dd:ee:01",
+               lease_client_id: "01:aa:bb:cc:dd:ee:01",
                hostname: ""
              }
            ]

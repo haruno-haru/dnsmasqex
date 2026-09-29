@@ -35,8 +35,15 @@ defmodule Dnsmasqex.Server do
   @spec reload(VintageNet.ifname()) :: :ok | {:error, any()}
   def reload(ifname), do: call(ifname, :reload)
 
+  @spec dump_stats(VintageNet.ifname()) :: :ok | {:error, term()}
+  def dump_stats(ifname), do: call(ifname, :dump_stats)
+
+  @spec dns_endpoint(VintageNet.ifname()) ::
+          {:ok, {:inet.ip_address(), pos_integer()}} | {:error, term()}
+  def dns_endpoint(ifname), do: call(ifname, :dns_endpoint)
+
   defp call(ifname, request) do
-    GenServer.call(via_name(ifname), request)
+    GenServer.call(via_name(ifname), request, 180_000)
   catch
     :exit, {:noproc, _} -> {:error, :not_running}
   end
@@ -81,7 +88,17 @@ defmodule Dnsmasqex.Server do
          :ok <- validate_file(new_state, option),
          :ok <- write_file(new_state, option) do
       :ok = publish(new_state, option)
-      {:reply, signal(new_state), new_state}
+
+      new_state = %{
+        new_state
+        | dhcp_enabled?:
+            match?(%{ipv4: %{method: :static}}, new_state.config) and
+              Config.dhcp_enabled?(new_state.config.dnsmasq),
+          dhcpv6_enabled?: IPv6.dhcp_enabled?(new_state.config.dnsmasq)
+      }
+
+      operation = if option == :directives, do: "TERM", else: "HUP"
+      {:reply, apply_update(new_state, option, operation), new_state}
     else
       {:error, _reason} = error -> {:reply, error, state}
     end
@@ -89,6 +106,26 @@ defmodule Dnsmasqex.Server do
 
   def handle_call(:reload, _from, state) do
     reply = with {:ok, pid} <- running_dnsmasq(state), do: hangup(pid)
+    {:reply, reply, state}
+  end
+
+  def handle_call(:dump_stats, _from, state) do
+    reply = with {:ok, pid} <- running_dnsmasq(state), do: send_signal(pid, "USR1")
+    {:reply, reply, state}
+  end
+
+  def handle_call(:dns_endpoint, _from, state) do
+    dnsmasq = state.config.dnsmasq
+    port = Map.get(dnsmasq, :port, List.last(Keyword.get_values(dnsmasq.directives, :port)) || 53)
+    address = get_in(state.config, [:ipv4, :address]) || get_in(state.config, [:ipv6, :address])
+
+    reply =
+      cond do
+        port == 0 -> {:error, :dns_disabled}
+        is_nil(address) -> {:error, :no_static_listen_address}
+        true -> {:ok, {address, port}}
+      end
+
     {:reply, reply, state}
   end
 
@@ -106,8 +143,36 @@ defmodule Dnsmasqex.Server do
   defp change(command, _args, %{dhcpv6_enabled?: false}) when command in @lease6_commands,
     do: {:error, :dhcpv6_disabled}
 
+  defp change(option, [value], state) when option in [:dhcp_hosts, :dhcp_options] do
+    if Config.dhcp_services?(state.config.dnsmasq),
+      do: {:ok, option, normalize(state, option, value)},
+      else: {:error, :dhcp_disabled}
+  end
+
+  defp change(:directives, [value], state) do
+    normalized = Config.normalize_value(state.config, :directives, value)
+    next = put_in(state.config.dnsmasq.directives, normalized)
+    original = state.config.dnsmasq
+    updated = next.dnsmasq
+
+    if Config.dhcp_services?(original) != Config.dhcp_services?(updated) or
+         IPv6.ra_enabled?(original) != IPv6.ra_enabled?(updated) or
+         Keyword.get_values(original.directives, :user) != Keyword.get_values(normalized, :user),
+       do: {:error, :requires_interface_reconfiguration},
+       else: {:ok, :directives, normalized}
+  end
+
   defp change(option, [value], state)
-       when option in [:static_leases, :options, :records, :static_leases6, :options6],
+       when option in [
+              :static_leases,
+              :options,
+              :records,
+              :static_leases6,
+              :options6,
+              :upstreams,
+              :dhcp_hosts,
+              :dhcp_options
+            ],
        do: {:ok, option, normalize(state, option, value)}
 
   defp change(:add_static_lease6, [lease], state) do
@@ -256,7 +321,44 @@ defmodule Dnsmasqex.Server do
     {_path, contents} =
       Config.runtime_file(option, state.config.dnsmasq, state.tmpdir, state.ifname)
 
-    Preflight.runtime(Config.dnsmasq_path(), option, contents, state.tmpdir)
+    timeout = Map.get(state.config.dnsmasq, :preflight_timeout, 5_000)
+
+    if option == :directives do
+      Preflight.replacement(
+        Config.dnsmasq_path(),
+        Config.conf_path(state.tmpdir, state.ifname),
+        Config.runtime_path(:directives, state.tmpdir, state.ifname),
+        contents,
+        Config.required_features(state.config),
+        Config.validation_files(state.config, state.tmpdir, state.ifname),
+        timeout
+      )
+    else
+      Preflight.runtime(Config.dnsmasq_path(), option, contents, state.tmpdir, timeout)
+    end
+  end
+
+  defp apply_update(state, option, operation) do
+    {reply, status} =
+      case running_dnsmasq(state) do
+        {:ok, pid} ->
+          case send_signal(pid, operation) do
+            :ok -> {:ok, if(operation == "TERM", do: :restart_signaled, else: :reload_signaled)}
+            {:error, reason} = error -> {error, {:signal_failed, reason}}
+          end
+
+        {:error, :not_running} ->
+          Daemon.retry(state.ifname)
+          {:ok, :pending_start}
+      end
+
+    PropertyTable.put(VintageNet, ["interface", state.ifname, "dnsmasq", "update"], %{
+      option: option,
+      state: status,
+      saved: true
+    })
+
+    reply
   end
 
   defp publish(state, option) do
@@ -281,8 +383,13 @@ defmodule Dnsmasqex.Server do
     )
   end
 
-  defp hangup(pid) do
-    case System.cmd("kill", ["-HUP", Integer.to_string(pid)], stderr_to_stdout: true) do
+  defp hangup(pid), do: send_signal(pid, "HUP")
+
+  defp send_signal(pid, signal) do
+    case MuonTrap.cmd("kill", ["-#{signal}", Integer.to_string(pid)],
+           stderr_to_stdout: true,
+           timeout: 1_000
+         ) do
       {_output, 0} -> :ok
       {output, _status} -> {:error, String.trim(output)}
     end

@@ -89,6 +89,21 @@ defmodule Dnsmasqex.Config do
     `:interface` listens on all addresses of the interface. Defaults to
     `:addresses` unless router advertisements are enabled, which require
     `:interface`
+  * `:port` - DNS port, 0..65535; 0 disables DNS while retaining DHCP/TFTP
+  * `:cache_size`, `:dns_forward_max`, `:dhcp_lease_max` - native resource limits
+  * `:directives` - advanced keyword options; see `Dnsmasqex.Directives`
+  * `:upstreams` - reloadable `:server`, `:local` and `:rev_server` directives.
+    These supplement `:name_servers` and `:forward_domains`; set `name_servers: []`
+    to manage all forwarding with this list
+  * `:dhcp_hosts`, `:dhcp_options` - reloadable lists using native `dhcp-host`
+    and `dhcp-option` grammar, including tags, client IDs and IPv6 multi-address
+    reservations. Forced options use `:dhcp_option_force` in `:directives`
+  * `:user`, `:group` - daemon credentials after startup; defaults to root
+    for compatibility. Script identity is controlled by native `:dhcp_scriptuser`
+  * `:notify_mode` - optional permissions on the event socket, as an octal integer
+  * `:startup_timeout` - PID readiness deadline in milliseconds, default 10000
+  * `:preflight_timeout` - deadline for each system validation command, default 5000
+  * `:log_level` - daemon output level, default `:debug`
 
   Unknown keys are rejected. Named and numeric aliases of a DHCP option may
   not appear together. Runtime put and delete operations accept either form.
@@ -96,6 +111,7 @@ defmodule Dnsmasqex.Config do
 
   alias Dnsmasqex.Config.Names
   alias Dnsmasqex.Daemon
+  alias Dnsmasqex.Directives
   alias Dnsmasqex.IPv6
   alias Dnsmasqex.Notifications
   alias Dnsmasqex.Server
@@ -103,7 +119,17 @@ defmodule Dnsmasqex.Config do
   alias VintageNet.Interface.RawConfig
   alias VintageNet.IP
 
-  @runtime_options [:static_leases, :options, :records, :static_leases6, :options6]
+  @runtime_options [
+    :static_leases,
+    :options,
+    :records,
+    :static_leases6,
+    :options6,
+    :directives,
+    :upstreams,
+    :dhcp_hosts,
+    :dhcp_options
+  ]
   @options [
     :start,
     :end,
@@ -128,11 +154,34 @@ defmodule Dnsmasqex.Config do
     :authoritative,
     :lease_path,
     :hosts_dir,
-    :listen_mode
+    :listen_mode,
+    :directives,
+    :upstreams,
+    :dhcp_hosts,
+    :dhcp_options,
+    :port,
+    :cache_size,
+    :dhcp_lease_max,
+    :dns_forward_max,
+    :user,
+    :group,
+    :startup_timeout,
+    :preflight_timeout,
+    :log_level,
+    :notify_mode
   ]
 
   @typedoc false
-  @type runtime_option :: :static_leases | :options | :records | :static_leases6 | :options6
+  @type runtime_option ::
+          :static_leases
+          | :options
+          | :records
+          | :static_leases6
+          | :options6
+          | :directives
+          | :upstreams
+          | :dhcp_hosts
+          | :dhcp_options
 
   @doc """
   Normalize the `:dnsmasq` options
@@ -149,7 +198,7 @@ defmodule Dnsmasqex.Config do
     ipv4 = static_ipv4(config)
     ipv6 = IPv6.interface(config)
 
-    if ipv4 || ipv6 do
+    if ipv4 || ipv6 || IPv6.unmanaged?(config) do
       normalize_dnsmasq(config, dnsmasq, ipv4, ipv6)
     else
       _ = IPv6.normalize_dnsmasq(dnsmasq, nil)
@@ -168,6 +217,7 @@ defmodule Dnsmasqex.Config do
 
     new_dnsmasq =
       dnsmasq
+      |> normalize_advanced()
       |> normalize_range(ipv4)
       |> check_lease_time()
       |> check_path(:hosts_dir, "dhcp-hostsdir")
@@ -189,8 +239,80 @@ defmodule Dnsmasqex.Config do
       |> IPv6.normalize_dnsmasq(ipv6)
       |> normalize_listen_mode()
 
+    if IPv6.native_ranges?(new_dnsmasq) and is_nil(ipv6) and not IPv6.unmanaged?(config),
+      do:
+        raise(
+          ArgumentError,
+          "Native IPv6 ranges require :ipv6 with :static or :manual addressing"
+        )
+
+    new_dnsmasq =
+      if IPv6.unmanaged?(config),
+        do: Map.put(new_dnsmasq, :listen_mode, :interface),
+        else: new_dnsmasq
+
     %{config | dnsmasq: new_dnsmasq}
   end
+
+  defp normalize_advanced(dnsmasq) do
+    directives = Directives.normalize(Map.get(dnsmasq, :directives, []))
+
+    for key <- [:port, :cache_size, :dhcp_lease_max, :dns_forward_max, :user, :group],
+        Map.has_key?(dnsmasq, key) do
+      _ = Directives.normalize([{key, dnsmasq[key]}])
+
+      if key in [:user, :group] and not is_binary(dnsmasq[key]),
+        do: raise(ArgumentError, "dnsmasq #{key} must be a name")
+
+      if Keyword.has_key?(directives, key),
+        do: raise(ArgumentError, "dnsmasq #{key} appears both directly and in :directives")
+    end
+
+    if Directives.enabled?(directives, :dhcp_range) and
+         (Map.has_key?(dnsmasq, :start) or Map.has_key?(dnsmasq, :dhcpv6)),
+       do: raise(ArgumentError, "Use either native :dhcp_range directives or :start/:dhcpv6")
+
+    check_runtime_settings(dnsmasq)
+
+    dnsmasq
+    |> Map.put(:directives, directives)
+    |> Map.update(:upstreams, [], &normalize_upstreams/1)
+    |> Map.update(:dhcp_hosts, [], &native_lines!(&1, :dhcp_host))
+    |> Map.update(:dhcp_options, [], &native_lines!(&1, :dhcp_option))
+  end
+
+  defp check_runtime_settings(dnsmasq) do
+    for {key, default} <- [startup_timeout: 10_000, preflight_timeout: 5_000] do
+      value = Map.get(dnsmasq, key, default)
+
+      unless is_integer(value) and value in 1..60_000,
+        do: raise(ArgumentError, "dnsmasq #{key} must be 1..60000 milliseconds")
+    end
+
+    if Map.get(dnsmasq, :log_level, :debug) not in [:debug, :info, :notice, :warning, :error],
+      do: raise(ArgumentError, "Invalid dnsmasq :log_level")
+
+    if Map.has_key?(dnsmasq, :notify_mode) and dnsmasq.notify_mode not in 0..0o777,
+      do: raise(ArgumentError, "Invalid dnsmasq :notify_mode")
+  end
+
+  defp normalize_upstreams(options) do
+    options = Directives.normalize(options)
+
+    if Enum.any?(options, fn {key, _} -> key not in [:server, :local, :rev_server] end),
+      do: raise(ArgumentError, "dnsmasq :upstreams accepts only :server, :local and :rev_server")
+
+    options
+  end
+
+  defp native_lines!(values, key) when is_list(values) do
+    Enum.map(values, fn value ->
+      [{^key, value}] = Directives.normalize([{key, value}])
+      value
+    end)
+  end
+
+  defp native_lines!(_values, key), do: raise(ArgumentError, "Expected a list for #{key}")
 
   defp normalize_listen_mode(dnsmasq) do
     ra? = IPv6.ra_enabled?(dnsmasq)
@@ -638,26 +760,7 @@ defmodule Dnsmasqex.Config do
   defp upstreams!(servers) when is_list(servers), do: Enum.map(servers, &upstream!/1)
   defp upstreams!(server), do: [upstream!(server)]
 
-  defp upstream!(ip) when is_binary(ip) do
-    case String.split(ip, "%") do
-      [address, scope] ->
-        address = ip!(address)
-
-        if tuple_size(address) != 8 or
-             not Regex.match?(~r/\A[a-zA-Z0-9_.:-]{1,15}\z/, scope),
-           do: raise(ArgumentError, "Invalid scoped IPv6 upstream #{inspect(ip)}")
-
-        IP.ip_to_string(address) <> "%" <> scope
-
-      [_address] ->
-        ip!(ip)
-
-      _ ->
-        raise ArgumentError, "Invalid scoped IPv6 upstream #{inspect(ip)}"
-    end
-  end
-
-  defp upstream!(ip), do: ip!(ip)
+  defp upstream!(ip), do: Dnsmasqex.Upstream.normalize(ip)
 
   defp upstream_string(ip) when is_binary(ip), do: ip
   defp upstream_string(ip), do: IP.ip_to_string(ip)
@@ -764,7 +867,7 @@ defmodule Dnsmasqex.Config do
 
     context = %{
       ifname: ifname,
-      subnets: Enum.reject([ipv4, ipv6], &is_nil/1),
+      subnets: Enum.reject([ipv4], &is_nil/1) ++ IPv6.interfaces(config),
       lease_path: lease_path(dnsmasq, tmpdir, ifname)
     }
 
@@ -773,6 +876,11 @@ defmodule Dnsmasqex.Config do
       report_env: true,
       dispatcher: &Notifications.dispatch(&1, &2, context)
     ]
+
+    notifier_options =
+      if Map.has_key?(dnsmasq, :notify_mode),
+        do: Keyword.put(notifier_options, :mode, dnsmasq.notify_mode),
+        else: notifier_options
 
     notifier = Supervisor.child_spec({BEAMNotify, notifier_options}, id: :dnsmasq_notify)
 
@@ -787,13 +895,15 @@ defmodule Dnsmasqex.Config do
          config_path: conf_path(tmpdir, ifname),
          pid_path: pid_path(tmpdir, ifname),
          required_features: required_features(config),
-         runtime_files: Enum.map(@runtime_options, &{&1, runtime_path(&1, tmpdir, ifname)}),
+         startup_timeout: Map.get(dnsmasq, :startup_timeout, 10_000),
+         preflight_timeout: Map.get(dnsmasq, :preflight_timeout, 5_000),
+         runtime_files: validation_files(config, tmpdir, ifname),
          args: ["-k", "-C", conf_path(tmpdir, ifname), "--log-facility=-"],
          opts:
            Command.add_muon_options(
              env: BEAMNotify.env(notifier_options),
              stderr_to_stdout: true,
-             log_output: :debug
+             log_output: Map.get(dnsmasq, :log_level, :debug)
            )},
         id: :dnsmasq
       )
@@ -802,7 +912,8 @@ defmodule Dnsmasqex.Config do
       raw_config
       | files:
           [
-            {conf_path(tmpdir, ifname), dnsmasq_contents(dnsmasq, ifname, ipv4, ipv6, tmpdir)}
+            {conf_path(tmpdir, ifname),
+             dnsmasq_contents(dnsmasq, ifname, ipv4, ipv6, tmpdir, opts)}
             | Enum.map(@runtime_options, &runtime_file(&1, dnsmasq, tmpdir, ifname))
           ] ++ raw_config.files,
         cleanup_files:
@@ -826,12 +937,18 @@ defmodule Dnsmasqex.Config do
 
     ipv6? =
       IPv6.interface(config) != nil or
-        Enum.any?(upstreams, &(is_binary(&1) or tuple_size(&1) == 8))
+        Enum.any?(
+          upstreams,
+          &if(is_binary(&1), do: String.contains?(&1, ":"), else: tuple_size(&1) == 8)
+        )
 
-    [:dhcp, :scripts] ++
+    if(dhcp_services?(dnsmasq), do: [:dhcp, :scripts], else: []) ++
+      Directives.features(dnsmasq.directives) ++
       for {feature, required?} <- [
-            ipv6: ipv6?,
-            dhcpv6: Map.has_key?(dnsmasq, :dhcpv6),
+            ipv6: ipv6? or IPv6.unmanaged?(config) or IPv6.native_ranges?(dnsmasq),
+            dhcpv6:
+              Map.has_key?(dnsmasq, :dhcpv6) or IPv6.native_ranges?(dnsmasq) or
+                Directives.ra?(dnsmasq.directives),
             inotify: Map.has_key?(dnsmasq, :hosts_dir),
             nftset: dnsmasq.nftsets != []
           ],
@@ -846,32 +963,50 @@ defmodule Dnsmasqex.Config do
     |> Enum.map(&{:fun, File, :mkdir_p, [&1]})
   end
 
-  defp dnsmasq_contents(dnsmasq, ifname, ipv4, ipv6, tmpdir) do
+  defp dnsmasq_contents(dnsmasq, ifname, ipv4, ipv6, tmpdir, opts) do
     [
       if(dnsmasq.listen_mode == :interface, do: "interface=#{ifname}", else: []),
       "except-interface=lo",
       for(
-        subnet <- [ipv4, ipv6],
+        subnet <- [ipv4, ipv6] ++ if(ipv6, do: Map.get(ipv6, :addresses, []), else: []),
         subnet,
         do: "listen-address=#{IP.ip_to_string(subnet.address)}"
       ),
-      if(ipv6, do: "bind-dynamic", else: "bind-interfaces"),
+      if(ipv6 || dnsmasq.listen_mode == :interface, do: "bind-dynamic", else: "bind-interfaces"),
       "no-hosts",
-      upstream(dnsmasq),
+      upstream(dnsmasq, opts),
       local_domain(dnsmasq),
-      "user=root",
+      if(Directives.enabled?(dnsmasq.directives, :user),
+        do: [],
+        else: "user=#{Map.get(dnsmasq, :user, "root")}"
+      ),
+      for(
+        key <- [:port, :cache_size, :dhcp_lease_max, :dns_forward_max, :group],
+        Map.has_key?(dnsmasq, key),
+        line <- Directives.lines([{key, dnsmasq[key]}]),
+        do: line
+      ),
       "pid-file=#{pid_path(tmpdir, ifname)}",
-      "dhcp-leasefile=#{lease_path(dnsmasq, tmpdir, ifname)}",
-      "dhcp-script=#{BEAMNotify.bin_path()}",
-      "script-arp",
-      "script-on-renewal",
+      if(dhcp_services?(dnsmasq),
+        do: [
+          "dhcp-leasefile=#{lease_path(dnsmasq, tmpdir, ifname)}",
+          "dhcp-script=#{BEAMNotify.bin_path()}",
+          "script-arp",
+          "script-on-renewal",
+          "dhcp-hostsfile=#{runtime_path(:static_leases, tmpdir, ifname)}",
+          "dhcp-optsfile=#{runtime_path(:options, tmpdir, ifname)}",
+          "dhcp-hostsfile=#{runtime_path(:static_leases6, tmpdir, ifname)}",
+          "dhcp-optsfile=#{runtime_path(:options6, tmpdir, ifname)}",
+          "dhcp-hostsfile=#{runtime_path(:dhcp_hosts, tmpdir, ifname)}",
+          "dhcp-optsfile=#{runtime_path(:dhcp_options, tmpdir, ifname)}"
+        ],
+        else: []
+      ),
       authoritative(dnsmasq),
       dhcp_range(dnsmasq, ipv4),
       IPv6.config_lines(dnsmasq, ipv6, ifname),
-      "dhcp-hostsfile=#{runtime_path(:static_leases, tmpdir, ifname)}",
-      "dhcp-optsfile=#{runtime_path(:options, tmpdir, ifname)}",
-      "dhcp-hostsfile=#{runtime_path(:static_leases6, tmpdir, ifname)}",
-      "dhcp-optsfile=#{runtime_path(:options6, tmpdir, ifname)}",
+      "conf-file=#{runtime_path(:directives, tmpdir, ifname)}",
+      "servers-file=#{runtime_path(:upstreams, tmpdir, ifname)}",
       hosts_dir(dnsmasq),
       "addn-hosts=#{runtime_path(:records, tmpdir, ifname)}",
       Enum.map(dnsmasq.domain_records, fn {name, ip} ->
@@ -890,8 +1025,15 @@ defmodule Dnsmasqex.Config do
     end)
   end
 
-  defp upstream(dnsmasq) do
-    resolv = if Map.has_key?(dnsmasq, :name_servers), do: ["no-resolv"], else: []
+  defp upstream(dnsmasq, opts) do
+    resolver = Keyword.get(opts, :resolvconf, "/etc/resolv.conf")
+    _ = check_path(%{resolver: resolver}, :resolver, "resolv-file")
+
+    resolv =
+      if Map.has_key?(dnsmasq, :name_servers),
+        do: ["no-resolv"],
+        else: ["resolv-file=#{resolver}"]
+
     servers = Enum.map(Map.get(dnsmasq, :name_servers, []), &"server=#{upstream_string(&1)}")
 
     forwards =
@@ -915,7 +1057,9 @@ defmodule Dnsmasqex.Config do
   end
 
   defp dhcp_range(dnsmasq, ipv4) do
-    if ipv4 && dhcp_enabled?(dnsmasq), do: static_range(dnsmasq, ipv4), else: []
+    if ipv4 && dhcp_enabled?(dnsmasq) && not Directives.enabled?(dnsmasq.directives, :dhcp_range),
+      do: static_range(dnsmasq, ipv4),
+      else: []
   end
 
   @doc false
@@ -923,7 +1067,19 @@ defmodule Dnsmasqex.Config do
   def dhcp_enabled?(%{start: _, end: _}), do: true
   def dhcp_enabled?(%{hosts_dir: _}), do: true
   def dhcp_enabled?(%{static_leases: [_ | _]}), do: true
-  def dhcp_enabled?(_dnsmasq), do: false
+
+  def dhcp_enabled?(dnsmasq),
+    do:
+      Map.get(dnsmasq, :dhcp_hosts, []) != [] or
+        Directives.dhcp?(Map.get(dnsmasq, :directives, []))
+
+  @doc false
+  @spec dhcp_services?(map()) :: boolean()
+  def dhcp_services?(dnsmasq),
+    do:
+      dhcp_enabled?(dnsmasq) or Map.has_key?(dnsmasq, :dhcpv6) or
+        Map.get(dnsmasq, :options, %{}) != %{} or Map.get(dnsmasq, :dhcp_options, []) != [] or
+        Directives.enabled?(Map.get(dnsmasq, :directives, []), :enable_tftp)
 
   defp static_range(dnsmasq, ipv4) do
     subnet = IP.to_subnet(ipv4.address, ipv4.prefix_length)
@@ -946,6 +1102,20 @@ defmodule Dnsmasqex.Config do
   def runtime_options(), do: @runtime_options
 
   @doc false
+  @spec validation_files(map(), Path.t(), VintageNet.ifname()) :: [{atom(), Path.t()}]
+  def validation_files(%{dnsmasq: dnsmasq}, tmpdir, ifname) do
+    managed = Enum.map(@runtime_options, &{&1, runtime_path(&1, tmpdir, ifname)})
+    hosts = if dnsmasq[:hosts_dir], do: [static_leases: dnsmasq.hosts_dir], else: []
+
+    directories =
+      for {key, path} <- dnsmasq.directives,
+          key in [:dhcp_hostsdir, :dhcp_optsdir],
+          do: {if(key == :dhcp_hostsdir, do: :static_leases, else: :options), path}
+
+    managed ++ hosts ++ directories
+  end
+
+  @doc false
   @spec runtime_file(runtime_option(), map(), Path.t(), VintageNet.ifname()) ::
           {Path.t(), String.t()}
   def runtime_file(key, dnsmasq, tmpdir, ifname),
@@ -954,6 +1124,12 @@ defmodule Dnsmasqex.Config do
   defp runtime_contents(:static_leases, leases), do: Enum.map_join(leases, &host_line/1)
   defp runtime_contents(:static_leases6, leases), do: IPv6.hosts_contents(leases)
   defp runtime_contents(:options6, options), do: IPv6.options_contents(options)
+
+  defp runtime_contents(key, options) when key in [:directives, :upstreams],
+    do: Enum.map_join(Directives.lines(options), &(&1 <> "\n"))
+
+  defp runtime_contents(key, lines) when key in [:dhcp_hosts, :dhcp_options],
+    do: Enum.map_join(lines, &(&1 <> "\n"))
 
   defp runtime_contents(:records, records),
     do: Enum.map_join(records, fn {name, ip} -> "#{IP.ip_to_string(ip)} #{name}\n" end)
@@ -1033,6 +1209,14 @@ defmodule Dnsmasqex.Config do
     do: Path.join(tmpdir, "dnsmasq.#{ifname}.hosts6")
 
   def runtime_path(:options6, tmpdir, ifname), do: Path.join(tmpdir, "dnsmasq.#{ifname}.options6")
+  def runtime_path(:directives, tmpdir, ifname), do: Path.join(tmpdir, "dnsmasq.#{ifname}.native")
+  def runtime_path(:upstreams, tmpdir, ifname), do: Path.join(tmpdir, "dnsmasq.#{ifname}.servers")
+
+  def runtime_path(:dhcp_hosts, tmpdir, ifname),
+    do: Path.join(tmpdir, "dnsmasq.#{ifname}.native-hosts")
+
+  def runtime_path(:dhcp_options, tmpdir, ifname),
+    do: Path.join(tmpdir, "dnsmasq.#{ifname}.native-options")
 
   defp lease_path(%{lease_path: path}, _tmpdir, _ifname), do: path
   defp lease_path(_dnsmasq, tmpdir, ifname), do: Path.join(tmpdir, "dnsmasq.#{ifname}.leases")

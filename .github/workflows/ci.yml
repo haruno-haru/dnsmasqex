@@ -84,7 +84,7 @@ jobs:
       - name: Install system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential libmnl-dev libnl-genl-3-dev dnsmasq-base iproute2 python3
+          sudo apt-get install -y build-essential libmnl-dev libnl-genl-3-dev dnsmasq-base iproute2 python3 nftables
       - uses: erlef/setup-beam@v1
         with:
           elixir-version: "1.20.4"

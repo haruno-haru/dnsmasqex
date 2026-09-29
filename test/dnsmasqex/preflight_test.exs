@@ -67,4 +67,20 @@ defmodule Dnsmasqex.PreflightTest do
 
     assert File.ls!(tmpdir) == []
   end
+
+  @tag :dnsmasq
+  test "validates external DHCP directories with the native backup-file rules", %{tmp_dir: tmpdir} do
+    directory = Path.join(tmpdir, "hosts")
+    File.mkdir!(directory)
+    File.write!(Path.join(directory, "device"), "# wired device\n02:00:00:00:00:02,192.0.2.100\n")
+
+    for name <- [".hidden", "device~", "#backup#"],
+        do: File.write!(Path.join(directory, name), "id:01:02,[broken]\n")
+
+    assert :ok = Preflight.check("dnsmasq", "/dev/null", [:dhcp], static_leases: directory)
+    File.write!(Path.join(directory, "#active"), "id:01:02,[broken]\n")
+
+    assert {:error, {:invalid_configuration, _}} =
+             Preflight.check("dnsmasq", "/dev/null", [:dhcp], static_leases: directory)
+  end
 end

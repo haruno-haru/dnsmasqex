@@ -22,8 +22,8 @@ end
 ```
 
 > Dnsmasqex also requires dnsmasq, which isn't in the official Nerves
-> systems. In Buildroot, enable `BR2_PACKAGE_DNSMASQ`. dnsmasq needs its DHCP
-> and script support, which its default build includes.
+> systems. In Buildroot, enable `BR2_PACKAGE_DNSMASQ`. DHCP and event reporting
+> need DHCP and script support. DNS-only configurations also work with reduced builds.
 >
 > If dnsmasq isn't on the `PATH`, set its location:
 >
@@ -116,8 +116,10 @@ are described in [IPv6 and dual stack](#ipv6-and-dual-stack).
 * `:txt_records` - `{name, text}` or `{name, [text]}` pairs
 * `:mx_records` - `{name, target}` or `{name, target, preference}` tuples
 * `:name_servers` - upstream DNS servers. Without it, dnsmasq follows the name
-  servers VintageNet writes to `/etc/resolv.conf`. `[]` forwards nothing.
-  Scoped IPv6 strings such as `"fe80::1%eth0"` select the upstream interface
+  servers in VintageNet's configured `:resolvconf` file (normally `/etc/resolv.conf`).
+  `[]` disables resolver-file forwarding. Scoped IPv6 strings such as
+  `"fe80::1%eth0"` select the upstream interface. Ports and sources are supported,
+  for example `"127.0.0.1#5353"` or `"192.0.2.53@eth0@192.0.2.1#5300"`
 * `:forward_domains` - `{domain, servers}` pairs that forward a domain and its
   subdomains to their own servers. `[]` answers them only from local names
 * `:nftsets` - `{domains, sets}` pairs that add the addresses dnsmasq resolves
@@ -214,6 +216,99 @@ dnsmasq: %{
 }
 ```
 
+## Advanced native capabilities
+
+Common settings have direct keys: `:port` (0..65535, with 0 disabling DNS),
+`:cache_size`, `:dns_forward_max` and `:dhcp_lease_max`. `:user` and `:group`
+select daemon credentials after startup. The compatibility default is root;
+when using another identity, ensure it can access the configured files.
+A native `:dhcp_scriptuser` also needs access to the notification socket;
+`:notify_mode` controls the socket's permissions.
+
+Use `:directives` for the remaining native options. It is a keyword list with
+underscores in option names, booleans for flags, integers for numeric controls,
+and strings for compound native grammar. Repeat keys where dnsmasq allows
+multiple entries. The library rejects unknown names, control characters,
+overlong lines, and attempts to replace supervision, scripts, binding or
+internally managed files. The installed binary then validates the actual syntax
+and available features. `Dnsmasqex.Directives.supported/0` lists the catalog.
+
+```elixir
+dnsmasq: %{
+  port: 5353,
+  cache_size: 1000,
+  dhcp_lease_max: 2000,
+  name_servers: ["127.0.0.1#5300"],
+  directives: [
+    strict_order: true,
+    stop_dns_rebind: true,
+    rebind_domain_ok: "/lan/",
+    dns_forward_max: 200,
+    max_tcp_connections: 50,
+    local_ttl: 30,
+    ptr_record: "1.24.168.192.in-addr.arpa,gateway.lan",
+    caa_record: "example.com,0,issue,ca.example"
+  ]
+}
+```
+
+Capability | Native keys (examples)
+---------- | ----------------------
+Cache, TTL and retries | `cache_rr`, `min_cache_ttl`, `max_cache_ttl`, `neg_ttl`, `use_stale_cache`, `fast_dns_retry`, `edns_packet_max`
+Forwarding and filtering | `strict_order`, `all_servers`, `rev_server`, `dns_loop_detect`, `domain_needed`, `filter_a`, `filter_aaaa`, `filter_rr`
+DNSSEC | `dnssec`, `trust_anchor`, `dnssec_check_unsigned`, `dnssec_timestamp`, `dnssec_limits`; supply maintained trust anchors and use a DNSSEC-enabled binary
+DNS data | `ptr_record`, `caa_record`, `naptr_record`, `dns_rr`, `host_record`, `interface_name`, `dynamic_host`, `synth_domain`; `host_record` and `cname` accept native TTL syntax
+Authoritative DNS | `auth_server`, `auth_zone`, `auth_soa`, `auth_ttl`, `auth_peer`, `auth_sec_servers`
+Client classification | `dhcp_mac`, `dhcp_vendorclass`, `dhcp_userclass`, `dhcp_match`, `dhcp_name_match`, `tag_if`, `dhcp_ignore`, `dhcp_option_force`
+Multiple pools and subnets | Repeated `dhcp_range`, `shared_network`, `bridge_interface`; use native ranges instead of `:start`/`:end` and `:dhcpv6`
+IPv6 prefix lifecycle and RA | `dhcp_range` with `constructor:`, `deprecated`, `off-link`, `ra-names`; `ra_param` for interval, preference and MTU; `dhcp_duid` for DUID-EN
+Boot services | `enable_tftp`, `tftp_root`, `tftp_secure`, `dhcp_boot`, `pxe_service`, `pxe_prompt`, `bootp_dynamic`
+Relay and lease queries | `dhcp_relay`, `dhcp_split_relay`, `leasequery`; the latter two require dnsmasq 2.92 or newer
+Firewall sets and marks | `ipset`, `nftset`, `conntrack`, `connmark_allowlist_enable`, `connmark_allowlist`; create the kernel sets separately
+Diagnostics and system integration | `log_queries`, `log_dhcp`, `log_debug`, `dumpfile`, `dumpmask`, `enable_dbus`, `enable_ubus`; buses use the installed daemon's native API and system permissions
+
+DHCP policy data can use `:dhcp_hosts` and `:dhcp_options`, which are reloadable
+lists in the native `dhcp-host` and `dhcp-option` grammar:
+
+```elixir
+dnsmasq: %{
+  name_servers: [],
+  directives: [
+    dhcp_range: "set:esp,192.168.24.10,192.168.24.99,255.255.255.0,1h",
+    dhcp_vendorclass: "set:esp,ESP",
+    dhcp_option_force: "tag:esp,option:ntp-server,192.168.24.1"
+  ],
+  dhcp_hosts: ["id:01:aa:bb:cc:dd:ee:ff,set:esp,192.168.24.100,esp32,1h"],
+  dhcp_options: ["tag:esp,option:dns-server,192.168.24.1"]
+}
+```
+
+Native host entries also support multiple MACs, client IDs, tags and multiple
+IPv6 addresses per DUID. Their semantics are checked by dnsmasq, including
+interactions with native ranges. The convenient `:static_leases` APIs retain
+their stricter single-address checks. Global options and tagged native rules
+follow dnsmasq's native precedence.
+
+For prefixes managed externally, including changes applied by another DHCPv6
+client, use this instead of a fixed `:dhcpv6` pool:
+
+```elixir
+ipv6: %{method: :manual},
+dnsmasq: %{
+  directives: [
+    dhcp_range: "::100,::1ff,constructor:eth1,slaac,64,1h",
+    ra_param: "eth1,high,30,1800"
+  ]
+}
+```
+
+The daemon follows suitable addresses on `eth1` as they appear or disappear.
+For several static prefixes, configure additional `:ipv6.addresses` and repeated
+native ranges. `deprecated` occupies the lease-time position of a native range.
+Routing and obtaining delegated prefixes remain the responsibility of the
+system. Original dnsmasq is neither a DHCPv6-PD allocator nor a DoH/DoT client;
+a local encrypted-DNS proxy can be selected through an upstream custom port.
+
 ## IPv6 and dual stack
 
 Set the interface's `:ipv6` address alongside `:ipv4` for dual stack, or use
@@ -222,8 +317,11 @@ address after the wrapped technology brings up the interface and removes it
 on shutdown. It uses Linux's `ip -6 addr` commands; the wrapped technology
 continues to handle the link and IPv4. DNS listens according to `:listen_mode`.
 
-The `:ipv6` map accepts only `:method`, `:address` and `:prefix_length` for a
-static address, or `%{method: :disabled}` to leave IPv6 unmanaged. It does not
+The `:ipv6` map accepts `:method`, `:address` and `:prefix_length` for a
+static address, with optional `:addresses` containing additional
+`%{address: ip, prefix_length: prefix}` entries. `%{method: :manual}` serves
+IPv6 on addresses managed externally and selects interface listening.
+`%{method: :disabled}` leaves IPv6 unused by this wrapper. Neither mode
 disable the kernel's IPv6 stack or configure routes and resolvers; unsupported
 fields are rejected.
 
@@ -271,8 +369,9 @@ accepts seconds from 120 to 4_294_967_294 or `:infinite`. DHCPv6 requires a
 prefix length of 64..128; advertisements require /64. Addresses must be on the
 interface's subnet. Pools cannot contain the server's address, and reservations
 cannot use it or the subnet-router anycast address (the subnet's all-zero host
-part). This release supports a single static IPv6 prefix per interface; prefix
-delegation and DHCPv6 client configuration are outside its scope.
+part). The convenient `:dhcpv6` pool uses the primary prefix; native ranges
+allow multiple prefixes. Applying delegated prefixes is supported through
+`constructor:`; obtaining them requires an external DHCPv6 client.
 
 `:enable_ra` defaults to `false`; `:slaac`, `:stateless` and `:ra_only` enable
 advertisements themselves. `:ra_lifetime` controls the advertised default route:
@@ -356,6 +455,46 @@ runtime server restores the configured values, including when the interface's
 supervision tree restarts. dnsmasq reads new files in `:hosts_dir` on its own,
 but needs `:reload` after one changes or is removed.
 
+### Advanced runtime updates
+
+Command | Arguments | Application
+------- | --------- | -----------
+`:upstreams` | `[directives]` | Replace reloadable `server`, `local` and `rev_server` entries, then HUP
+`:dhcp_hosts` | `[lines]` | Replace native reservations, then HUP
+`:dhcp_options` | `[lines]` | Replace native option rules, then HUP
+`:directives` | `[directives]` | Validate the complete prospective configuration, replace the native file and restart dnsmasq
+`:dump_stats` | `[]` | Ask dnsmasq to log its native statistics/cache dump with SIGUSR1
+
+`:upstreams` supplements the static forwarding settings. To control all
+forwarding through it, configure `name_servers: []` and put the servers in
+`:upstreams` from the start:
+
+```elixir
+dnsmasq: %{name_servers: [], upstreams: [server: "127.0.0.1#5353"]}
+# Later:
+VintageNet.ioctl("eth1", :upstreams, [[server: "127.0.0.1#5354"]])
+```
+
+Native directives that change whether DHCP or RA runs, or change native user
+selection, require `VintageNet.configure/2`; the update API returns
+`{:error, :requires_interface_reconfiguration}`. This keeps generated startup
+files and interface binding consistent. A native-record update through
+`:directives` briefly restarts DNS; ordinary `:records` updates do not.
+
+An accepted update publishes `dnsmasq/update` with `saved: true` and a state of
+`:reload_signaled`, `:restart_signaled`, `:pending_start`, or
+`{:signal_failed, reason}`. `:ok` means the file was saved and signaling either
+succeeded or is pending startup. HUP provides no acknowledgement that every
+client has received new data. Syntax failures leave the previous file and
+published configuration intact; a signal failure happens after saving and is
+reported as such. Runtime changes are restored to configured values if the
+interface supervision tree restarts.
+
+Read structured cache/upstream counters with `Dnsmasqex.statistics("eth1")`.
+For externally managed addressing, use
+`Dnsmasqex.Statistics.query({address_tuple, dns_port})`. Counters reset when the
+daemon restarts and are unavailable with `port=0` or native `no-ident`.
+
 ## Checking dnsmasq and the kernel
 
 dnsmasq builds differ. `Dnsmasqex.capabilities/0` reports the version
@@ -373,8 +512,8 @@ false
 names that nftables accepts without quotes. Avoid reserved words such as
 `set` and `counter`; keyword restrictions depend on the installed nftables
 version and aren't checked here.
-`VintageNet.verify_system/0` checks that dnsmasq can serve DHCP and run the
-script that reports events.
+`VintageNet.verify_system/0` checks that dnsmasq can execute and report its version.
+Each interface then checks the compiled features its configuration actually needs.
 
 Before each daemon start, Dnsmasqex checks the capabilities required by that
 interface: DHCP and scripts, IPv6 and DHCPv6 when used, inotify for `:hosts_dir`,
@@ -383,7 +522,9 @@ against the generated configuration and equivalent directives for its runtime
 lease and option files, since dnsmasq's own test skips those files.
 Runtime lease and option updates pass the same syntax check before replacing
 the current file; a rejected update leaves both the file and published value intact.
-Externally managed files in `:hosts_dir` are still read and checked by dnsmasq.
+Existing files in DHCP host and option directories are also included in startup
+validation. Later directory changes are read by dnsmasq; use explicit `:reload`
+where required by the native directory semantics.
 
 ## Properties
 
@@ -399,6 +540,11 @@ Property                | Values                       | Description
 `dnsmasq/records`       | `[{name, ip}, ...]`          | The records in use
 `dnsmasq/static_leases6` | `[lease, ...]`              | The IPv6 reservations in use
 `dnsmasq/options6`      | `%{option => value}`        | The DHCPv6 options in use
+`dnsmasq/directives`    | `[directive, ...]` | Configured advanced native options
+`dnsmasq/upstreams`     | `[directive, ...]` | Reloadable upstream entries
+`dnsmasq/dhcp_hosts`    | `[line, ...]` | Native reservations
+`dnsmasq/dhcp_options`  | `[line, ...]` | Native DHCP option rules
+`dnsmasq/update`        | `%{saved: boolean(), state: term(), ...}` | Latest runtime update outcome
 `dnsmasq/status`        | `%{state: atom(), ...}`     | Daemon lifecycle and startup failures
 
 Status is `:starting`, `:running`, `:retrying`, `:failed` or `:stopped`.
@@ -407,7 +553,10 @@ an end-to-end network health check. `:retrying` includes `:reason` and
 `:retry_in` in milliseconds. `:failed` includes the preflight `:reason`, such
 as `{:missing_features, [:dhcpv6]}` or `{:invalid_configuration, message}`.
 Fix the reported problem and reconfigure the interface to retry a preflight
-failure. Removing the interface clears these properties.
+failure. Accepted runtime file updates also retry a stopped daemon. Nonzero
+exits retain `{:exit_status, code}`. Validation commands and PID readiness have
+configurable deadlines (`:preflight_timeout`, default 5000 ms, and
+`:startup_timeout`, default 10000 ms). Removing the interface clears these properties.
 
 A lease looks like this:
 
@@ -422,7 +571,11 @@ A lease looks like this:
 
 IPv6 leases have `lease_mac: nil`, `lease_duid` and `lease_iaid`; dnsmasq's
 lease file does not store their MAC addresses. IAIDs are strings, with a `T`
-prefix for temporary leases. SLAAC addresses are not DHCP leases and do not
+prefix for temporary leases. IPv4 leases also expose `:lease_client_id`.
+On `no-RTC` builds, `:lease_length` records the saved duration and `:leasetime`
+is `:unknown` unless the current event supplies remaining time. A saved duration
+is not an expiry timestamp. Infinite leases remain `:infinity`.
+SLAAC addresses are not DHCP leases and do not
 appear in this list.
 
 ### Events
@@ -468,7 +621,7 @@ script arguments do not identify their interface.
 
 ## Debugging
 
-dnsmasq's output is logged at the `:debug` level. On Nerves, run
+dnsmasq's output is logged at `:debug` by default; `:log_level` selects another level. On Nerves, run
 `RingLogger.next` or `log_attach` from an IEx prompt, and lower the log level
 if needed. Errors found before startup also appear in `dnsmasq/status`.
 
@@ -483,7 +636,7 @@ Run `mix test`, `mix format --check-formatted`, `mix credo --strict`, and
 Installing dnsmasq enables configuration checks and real DNS queries over
 UDP and TCP. CI tests the distribution's dnsmasq package.
 
-The packet tests require Linux, root, `iproute2`, Python 3 and dnsmasq. Run
+The packet tests require Linux, root, `iproute2`, `nftables`, Python 3 and dnsmasq. Run
 them in a fresh network namespace after `mix deps.get` and `mix test`:
 
 ```sh

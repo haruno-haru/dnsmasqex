@@ -23,7 +23,9 @@ defmodule Dnsmasqex.Daemon do
           config_path: Path.t(),
           pid_path: Path.t(),
           required_features: [atom()],
-          runtime_files: [{atom(), Path.t()}]
+          runtime_files: [{atom(), Path.t()}],
+          startup_timeout: pos_integer(),
+          preflight_timeout: pos_integer()
         ]
 
   @enforce_keys [:ifname, :command, :args]
@@ -38,13 +40,27 @@ defmodule Dnsmasqex.Daemon do
     opts: [],
     required_features: [],
     runtime_files: [],
+    startup_timeout: 10_000,
+    preflight_timeout: 5_000,
     backoff: @min_backoff
   ]
 
   @spec start_link(init_args()) :: GenServer.on_start()
   def start_link(init_args) do
-    GenServer.start_link(__MODULE__, init_args)
+    GenServer.start_link(__MODULE__, init_args,
+      name: via_name(Keyword.fetch!(init_args, :ifname))
+    )
   end
+
+  @spec retry(VintageNet.ifname()) :: :ok
+  def retry(ifname), do: GenServer.cast(via_name(ifname), :retry)
+
+  defp via_name(ifname),
+    do: {:via, Registry, {VintageNet.Interface.Registry, {__MODULE__, ifname}}}
+
+  @impl GenServer
+  def handle_cast(:retry, %{pid: nil} = state), do: {:noreply, state, {:continue, :start}}
+  def handle_cast(:retry, state), do: {:noreply, state}
 
   @impl GenServer
   def init(init_args) do
@@ -62,13 +78,20 @@ defmodule Dnsmasqex.Daemon do
   def handle_info(:restart, state), do: {:noreply, state}
 
   def handle_info({:check_started, pid}, %{pid: pid} = state) do
-    _ =
-      case running_pid(state.pid_path, state.config_path) do
-        {:ok, os_pid} -> publish(state, %{state: :running, pid: os_pid})
-        {:error, :not_running} -> Process.send_after(self(), {:check_started, pid}, 50)
-      end
+    case running_pid(state.pid_path, state.config_path) do
+      {:ok, os_pid} ->
+        publish(state, %{state: :running, pid: os_pid})
+        {:noreply, state}
 
-    {:noreply, state}
+      {:error, :not_running} ->
+        if System.monotonic_time(:millisecond) - state.started_at >= state.startup_timeout do
+          Process.exit(pid, :shutdown)
+          {:noreply, schedule_restart(state, :startup_timeout)}
+        else
+          Process.send_after(self(), {:check_started, pid}, 50)
+          {:noreply, state}
+        end
+    end
   end
 
   def handle_info({:check_started, _pid}, state), do: {:noreply, state}
@@ -108,14 +131,17 @@ defmodule Dnsmasqex.Daemon do
         state.command,
         state.config_path,
         state.required_features,
-        state.runtime_files
+        state.runtime_files,
+        state.preflight_timeout
       )
 
   defp launch(state) do
     Logger.debug("[dnsmasqex(#{state.ifname})] starting #{state.command}")
     _ = if state.pid_path, do: File.rm(state.pid_path)
 
-    case MuonTrap.Daemon.start_link(state.command, state.args, state.opts) do
+    opts = Keyword.put_new(state.opts, :exit_status_to_reason, &{:exit_status, &1})
+
+    case MuonTrap.Daemon.start_link(state.command, state.args, opts) do
       {:ok, pid} ->
         _ = if state.pid_path, do: Process.send_after(self(), {:check_started, pid}, 50)
         %{state | pid: pid, started_at: System.monotonic_time(:millisecond)}

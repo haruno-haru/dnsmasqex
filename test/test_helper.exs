@@ -9,4 +9,5 @@ exclude =
   if System.get_env("DNSMASQEX_NETWORK_TESTS") == "1", do: exclude, else: [:network | exclude]
 
 Code.require_file("support/wired_technology_helper.exs", __DIR__)
+Code.require_file("support/dns_stub_helper.exs", __DIR__)
 ExUnit.start(exclude: exclude)

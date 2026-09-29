@@ -9,6 +9,7 @@ defmodule Dnsmasqex.NetworkIntegrationTest do
   alias Dnsmasqex.Event
   alias Dnsmasqex.Notifications
   alias Dnsmasqex.Server
+  alias Dnsmasqex.Test.DNSStub
   alias VintageNet.Interface.RawConfig
 
   @moduletag :network
@@ -127,11 +128,138 @@ defmodule Dnsmasqex.NetworkIntegrationTest do
     assert client(context, ["upstream"]) == ""
   end
 
+  test "uses VintageNet's custom resolver file for real forwarding", context do
+    path = Path.join(context.tmp_dir, "custom-resolv.conf")
+    File.write!(path, "nameserver 192.0.2.2\n")
+    start_server(Map.put(context, :resolvconf, path), :stateful, %{name_servers: :system})
+    assert client(context, ["resolver-upstream"]) == ""
+  end
+
+  test "preserves leases and server DUID through a supervised restart", context do
+    %{supervisor: supervisor} =
+      start_server(context, :stateful, %{
+        lease_path: Path.join(context.tmp_dir, "persistent.leases")
+      })
+
+    [address4, address6] =
+      context |> client(["acquire", state_path(context), "192.0.2.1"]) |> String.split()
+
+    ip(["-n", context.namespace, "addr", "add", "#{address4}/24", "dev", @client])
+    eventually(fn -> length(leases()) == 2 end)
+    assert :ok = Supervisor.terminate_child(supervisor, :dnsmasq)
+    assert {:ok, _} = Supervisor.restart_child(supervisor, :dnsmasq)
+
+    eventually(fn ->
+      match?(%{state: :running}, VintageNet.get(["interface", @ifname, "dnsmasq", "status"]))
+    end)
+
+    assert client(context, ["renew", state_path(context), "192.0.2.1"]) ==
+             "#{address4} #{address6}\n"
+
+    assert length(leases()) == 2
+  end
+
+  test "serves static DHCPv6 reservations without a dynamic IPv6 pool", context do
+    start_server(context, :static, %{
+      static_leases6: [
+        %{duid: @duid, ip: "fd12:3456:789a:1::120", lease_time: 600}
+      ]
+    })
+
+    assert client(context, ["acquire", state_path(context), "192.0.2.1"]) =~
+             " fd12:3456:789a:1::120\n"
+  end
+
+  test "handles DHCPv6 Rapid Commit, Confirm, Decline and temporary addresses", context do
+    start_server(context, :stateful)
+    assert client(context, ["advanced6"]) == ""
+  end
+
+  test "applies client-ID reservations and tagged forced options", context do
+    start_server(context, :stateful, %{
+      directives: [dhcp_vendorclass: "set:esp,ESP", dhcp_option_force: "tag:esp,42,192.0.2.123"],
+      dhcp_hosts: ["id:01:02:00:00:00:00:02,192.0.2.105,esp32,600"]
+    })
+
+    assert client(context, ["policy4"]) == ""
+    eventually(fn -> Enum.any?(leases(), &(&1[:lease_client_id] == "01:02:00:00:00:00:02")) end)
+  end
+
+  test "does not immediately reuse a declined IPv4 address", context do
+    start_server(context, :stateful)
+    assert client(context, ["decline4"]) == ""
+  end
+
+  test "serves a boot file using the system TFTP server", context do
+    File.write!(Path.join(context.tmp_dir, "boot.img"), "esp boot image")
+
+    start_server(context, :stateful, %{
+      directives: [enable_tftp: true, tftp_root: context.tmp_dir, dhcp_boot: "boot.img"]
+    })
+
+    assert client(context, ["tftp", "boot.img", "esp boot image"]) == ""
+  end
+
+  test "writes real A and AAAA answers into the selected nftables sets", context do
+    rules = Path.join(context.tmp_dir, "sets.nft")
+
+    File.write!(
+      rules,
+      "table inet dnsmasqex_test {\nset resolved4 { type ipv4_addr; }\nset resolved6 { type ipv6_addr; }\n}\n"
+    )
+
+    assert {output, 0} = System.cmd("nft", ["-f", rules], stderr_to_stdout: true)
+    assert output == ""
+
+    on_exit(fn ->
+      System.cmd("nft", ["delete", "table", "inet", "dnsmasqex_test"], stderr_to_stdout: true)
+    end)
+
+    upstream = start_supervised!({DNSStub, owner: self()})
+    port = DNSStub.port(upstream)
+
+    start_server(context, :stateful, %{
+      name_servers: ["127.0.0.1##{port}"],
+      nftsets: [
+        {["fw.example"], ["4#inet#dnsmasqex_test#resolved4", "6#inet#dnsmasqex_test#resolved6"]}
+      ]
+    })
+
+    for tcp? <- [false, true], type <- [:a, :aaaa] do
+      name = if tcp?, do: ~c"tcp.fw.example", else: ~c"udp.fw.example"
+
+      assert :inet_res.lookup(
+               name,
+               :in,
+               type,
+               [nameservers: [{{192, 0, 2, 1}, 53}], usevc: tcp?, timeout: 500],
+               1000
+             ) != []
+    end
+
+    for {set, address} <- [{"resolved4", "203.0.113.9"}, {"resolved6", "2001:db8::9"}] do
+      assert {contents, 0} =
+               System.cmd("nft", ["list", "set", "inet", "dnsmasqex_test", set],
+                 stderr_to_stdout: true
+               )
+
+      assert contents =~ address
+    end
+  end
+
   defp start_server(context, mode, extra \\ %{}) do
     range =
       if mode in [:stateful, :slaac],
         do: %{start: "fd12:3456:789a:1::100", end: "fd12:3456:789a:1::110"},
         else: %{}
+
+    extra = if extra[:name_servers] == :system, do: Map.delete(extra, :name_servers), else: extra
+    defaults = %{name_servers: []}
+
+    defaults =
+      if Map.has_key?(context, :resolvconf),
+        do: Map.delete(defaults, :name_servers),
+        else: defaults
 
     config =
       Config.normalize(%{
@@ -145,12 +273,11 @@ defmodule Dnsmasqex.NetworkIntegrationTest do
               lease_time: 600,
               domain: "lan",
               authoritative: true,
-              name_servers: [],
               options: %{dns: ["192.0.2.1"]},
               options6: %{dns: ["fd12:3456:789a:1::1"], search: ["lan"]},
               dhcpv6: Map.merge(range, %{mode: mode, lease_time: 600})
             },
-            extra
+            Map.merge(defaults, extra)
           )
       })
 
@@ -164,7 +291,8 @@ defmodule Dnsmasqex.NetworkIntegrationTest do
           up_cmds: [{:run, "ip", ["addr", "add", "192.0.2.1/24", "dev", @ifname]}]
         },
         config,
-        tmpdir: context.tmp_dir
+        tmpdir: context.tmp_dir,
+        resolvconf: Map.get(context, :resolvconf, "/etc/resolv.conf")
       )
 
     Enum.each(raw.files, fn {path, contents} -> File.write!(path, contents) end)
@@ -175,11 +303,17 @@ defmodule Dnsmasqex.NetworkIntegrationTest do
       output == ""
     end)
 
-    Enum.each(raw.child_specs, &start_supervised!/1)
+    supervisor =
+      start_supervised!(%{
+        id: :interface,
+        start: {Supervisor, :start_link, [raw.child_specs, [strategy: :one_for_one]]}
+      })
 
     eventually(fn ->
       match?(%{state: :running}, VintageNet.get(["interface", @ifname, "dnsmasq", "status"]))
     end)
+
+    %{supervisor: supervisor, config: config, raw: raw}
   end
 
   defp run_command({:run, command, args}) do

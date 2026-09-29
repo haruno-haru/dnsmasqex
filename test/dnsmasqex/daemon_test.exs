@@ -109,4 +109,44 @@ defmodule Dnsmasqex.DaemonTest do
   end
 
   defp status(), do: VintageNet.get(["interface", "eth1", "dnsmasq", "status"])
+
+  test "keeps the real exit status for a failed system daemon" do
+    property = ["interface", "eth1", "dnsmasq", "status"]
+    VintageNet.subscribe(property)
+
+    capture_log(fn ->
+      start_supervised!({Daemon, ifname: "eth1", command: "sh", args: ["-c", "exit 3"]})
+
+      assert_receive {VintageNet, ^property, _, %{state: :retrying, reason: {:exit_status, 3}},
+                      _},
+                     2000
+    end)
+  end
+
+  @tag :tmp_dir
+  test "terminates a process that never becomes ready and reports the timeout", %{tmp_dir: tmpdir} do
+    property = ["interface", "eth1", "dnsmasq", "status"]
+    VintageNet.subscribe(property)
+
+    capture_log(fn ->
+      server =
+        start_supervised!(
+          {Daemon,
+           ifname: "eth1",
+           command: "sleep",
+           args: ["60"],
+           pid_path: Path.join(tmpdir, "missing.pid"),
+           startup_timeout: 50}
+        )
+
+      %{pid: pid} = :sys.get_state(server)
+      ref = Process.monitor(pid)
+
+      assert_receive {VintageNet, ^property, _, %{state: :retrying, reason: :startup_timeout}, _},
+                     2000
+
+      assert_receive {:DOWN, ^ref, :process, ^pid, :shutdown}, 2000
+      assert Process.alive?(server)
+    end)
+  end
 end

@@ -1,0 +1,278 @@
+# SPDX-FileCopyrightText: 2026 Haruno Haru
+#
+# SPDX-License-Identifier: Apache-2.0
+#
+defmodule Dnsmasqex.AdvancedTest do
+  use ExUnit.Case, async: true
+
+  alias Dnsmasqex.{Config, Directives, Event, Leases, Notifications, Preflight, Upstream}
+  alias VintageNet.Interface.RawConfig
+
+  @moduletag :tmp_dir
+  @base %{ipv4: %{method: :static, address: {192, 0, 2, 1}, prefix_length: 24}, dnsmasq: %{}}
+
+  test "duration-format leases never pretend that a saved length is a remaining time", %{
+    tmp_dir: tmpdir
+  } do
+    contents = """
+    600 02:00:00:00:00:02 192.0.2.100 esp32 01:02:00:00:00:00:02
+    600 42 fd12::100 esp32v6 00:03:00:01:02:00:00:00:00:02
+    0 T43 fd12::101 permanent 00:03:00:01:02:00:00:00:00:02
+    """
+
+    for now <- [0, 1_800_000_000, 2_000_000_000] do
+      assert [
+               %{leasetime: :unknown, lease_length: 600},
+               %{leasetime: :unknown, lease_length: 600},
+               %{leasetime: :infinity}
+             ] = Leases.parse(contents, now, :duration)
+    end
+
+    path = Path.join(tmpdir, "leases")
+    File.write!(path, contents)
+    ifname = "duration-test"
+    on_exit(fn -> Notifications.clear(ifname) end)
+
+    Notifications.dispatch(
+      ["old", "02:00:00:00:00:02", "192.0.2.100", "esp32"],
+      %{"DNSMASQ_LEASE_LENGTH" => "600", "DNSMASQ_TIME_REMAINING" => "583"},
+      %{ifname: ifname, lease_path: path, subnets: []}
+    )
+
+    assert [
+             %{leasetime: 583, lease_client_id: "01:02:00:00:00:00:02"},
+             %{leasetime: :unknown},
+             %{leasetime: :infinity}
+           ] =
+             VintageNet.get(["interface", ifname, "dhcpd", "leases"])
+  end
+
+  test "retains restart and relay metadata without inventing missing fields" do
+    event =
+      Event.new(["old", "02:00:00:00:00:02", "192.0.2.100"], %{
+        "DNSMASQ_LEASE_EXPIRES" => "1800000600",
+        "DNSMASQ_DATA_MISSING" => "1",
+        "DNSMASQ_DOMAIN" => "lan",
+        "DNSMASQ_RELAY_ADDRESS" => "192.0.2.254",
+        "DNSMASQ_CIRCUIT_ID" => "01:02",
+        "DNSMASQ_REMOTE_ID" => "03:04",
+        "DNSMASQ_SUBSCRIBER_ID" => "05:06"
+      })
+
+    assert event.lease_expires == 1_800_000_600
+    assert event.data_missing == true
+    assert event.relay_address == "192.0.2.254"
+
+    assert {event.domain, event.circuit_id, event.remote_id, event.subscriber_id} ==
+             {"lan", "01:02", "03:04", "05:06"}
+
+    assert event.lease_length == nil
+  end
+
+  test "reports clock mode and bounds both executable probes", %{tmp_dir: tmpdir} do
+    path = Path.join(tmpdir, "dnsmasq")
+
+    File.write!(
+      path,
+      "#!/bin/sh\necho 'Dnsmasq version 2.93'\necho 'Compile time options: DHCP no-RTC'\n"
+    )
+
+    File.chmod!(path, 0o700)
+    assert {:ok, %{lease_time_format: :duration}} = Dnsmasqex.capabilities(path)
+
+    File.write!(path, "#!/bin/sh\nexec sleep 60\n")
+    assert {:error, "dnsmasq --version timed out"} = Dnsmasqex.capabilities(path, 30)
+
+    assert {:error, :preflight_timeout} =
+             Preflight.runtime(path, :options, "6,192.0.2.1\n", tmpdir, 30)
+
+    assert Path.wildcard(Path.join(tmpdir, ".dnsmasq-check-*")) == []
+  end
+
+  test "respects the resolver path while explicit servers remain authoritative", %{
+    tmp_dir: tmpdir
+  } do
+    path = Path.join(tmpdir, "resolv.conf")
+    config = Config.normalize(@base)
+    raw = raw(config, tmpdir, resolvconf: path)
+    assert elem(hd(raw.files), 1) =~ "resolv-file=#{path}\n"
+    explicit = Config.normalize(%{@base | dnsmasq: %{name_servers: []}})
+    text = elem(hd(raw(explicit, tmpdir, resolvconf: path).files), 1)
+    assert text =~ "no-resolv\n"
+    refute text =~ "resolv-file="
+    assert Config.required_features(config) == []
+    refute elem(hd(raw.files), 1) =~ "dhcp-script="
+
+    assert_raise ArgumentError, fn -> raw(config, tmpdir, resolvconf: path <> "\nport=0") end
+  end
+
+  test "normalizes upstream ports, scopes and sources without allowing injected directives" do
+    for endpoint <- [
+          "127.0.0.1#5353",
+          "fe80::1%eth0#5353",
+          "192.0.2.1#5353@192.0.2.2#5300",
+          "2001:db8::1@eth0@2001:db8::2#5300"
+        ] do
+      assert Upstream.normalize(endpoint) == endpoint
+    end
+
+    for endpoint <- [
+          "127.0.0.1#65536",
+          "127.0.0.1#x",
+          "127.0.0.1@::1",
+          "::1@eth0@eth1",
+          "127.0.0.1\nport=0",
+          "fe80::1%",
+          "127.0.0.1@"
+        ] do
+      assert_raise ArgumentError, fn -> Upstream.normalize(endpoint) end
+    end
+  end
+
+  test "advanced options cannot take over supervision or inject another directive" do
+    for key <- [
+          :pid_file,
+          :conf_file,
+          :conf_script,
+          :conf_dir,
+          :dhcp_script,
+          :leasefile_ro,
+          :interface,
+          :keep_in_foreground,
+          :test,
+          :typo
+        ] do
+      assert_raise ArgumentError, fn -> Directives.normalize([{key, "/tmp/override"}]) end
+    end
+
+    for {key, value} <- [
+          cache_size: true,
+          cache_size: -1,
+          port: 65_536,
+          port: "53",
+          max_tcp_connections: 0,
+          dhcp_host: "x\ny",
+          server: "x\ry"
+        ] do
+      assert_raise ArgumentError, fn -> Directives.normalize([{key, value}]) end
+    end
+
+    assert_raise ArgumentError, fn ->
+      Config.normalize(%{@base | dnsmasq: %{port: 5353, directives: [port: 5354]}})
+    end
+
+    assert_raise ArgumentError, fn ->
+      Config.normalize(%{@base | dnsmasq: %{upstreams: [cache_size: 10]}})
+    end
+  end
+
+  @tag :dnsmasq
+  test "the system parser checks native policies, records, and boot configuration together", %{
+    tmp_dir: tmpdir
+  } do
+    config =
+      Config.normalize(%{
+        @base
+        | dnsmasq: %{
+            port: 0,
+            cache_size: 512,
+            dhcp_lease_max: 100,
+            name_servers: [],
+            directives: [
+              dhcp_range: "set:esp,192.0.2.100,192.0.2.110,255.255.255.0,600",
+              dhcp_vendorclass: "set:esp,ESP",
+              dhcp_option_force: "tag:esp,42,192.0.2.1",
+              dhcp_ignore: "tag:!known",
+              dhcp_rapid_commit: true,
+              stop_dns_rebind: true,
+              rebind_domain_ok: "/lan/",
+              strict_order: true,
+              local_ttl: 30,
+              filter_aaaa: false,
+              ptr_record: "1.2.0.192.in-addr.arpa,gateway.lan",
+              caa_record: "lan,0,issue,ca.example",
+              naptr_record: "lan,10,20,\"s\",\"SIP+D2U\",\"\",_sip._udp.lan",
+              dhcp_boot: "boot.img",
+              enable_tftp: true,
+              tftp_root: tmpdir,
+              pxe_service: "x86PC,\"Boot\",boot"
+            ],
+            dhcp_hosts: ["id:01:02:03,set:esp,192.0.2.100,esp32,600"],
+            dhcp_options: ["tag:esp,option:dns-server,192.0.2.1"],
+            upstreams: [server: "127.0.0.1#5353", rev_server: "192.0.2.0/24,127.0.0.1#5353"]
+          }
+      })
+
+    assert Config.normalize(config) == config
+    raw = raw(config, tmpdir)
+    for {path, contents} <- raw.files, do: File.write!(path, contents)
+
+    assert :ok =
+             Preflight.check(
+               "dnsmasq",
+               Config.conf_path(tmpdir, "eth1"),
+               Config.required_features(config),
+               runtime_files(tmpdir)
+             )
+
+    # --test skips hostsfile contents unless the wrapper explicitly expands them.
+    File.write!(Config.runtime_path(:dhcp_hosts, tmpdir, "eth1"), "id:01:02:03,[not-an-ip]\n")
+
+    assert {:error, {:invalid_configuration, _}} =
+             Preflight.check(
+               "dnsmasq",
+               Config.conf_path(tmpdir, "eth1"),
+               Config.required_features(config),
+               runtime_files(tmpdir)
+             )
+  end
+
+  @tag :dnsmasq
+  test "constructs multiple IPv6 prefixes and validates advanced RA parameters", %{
+    tmp_dir: tmpdir
+  } do
+    config =
+      Config.normalize(%{
+        ipv6: %{method: :manual},
+        dnsmasq: %{
+          directives: [
+            dhcp_range: "::100,::1ff,constructor:eth1,slaac,64,600",
+            dhcp_range: "fd34::100,fd34::1ff,64,deprecated",
+            ra_param: "eth1,high,30,1800",
+            dhcp_duid: "1234,01:02:03:04"
+          ]
+        }
+      })
+
+    assert config.dnsmasq.listen_mode == :interface
+    assert :ipv6 in Config.required_features(config)
+    assert :dhcpv6 in Config.required_features(config)
+    raw = raw(config, tmpdir)
+    assert raw.up_cmds == []
+    for {path, contents} <- raw.files, do: File.write!(path, contents)
+
+    assert :ok =
+             Preflight.check(
+               "dnsmasq",
+               Config.conf_path(tmpdir, "eth1"),
+               Config.required_features(config),
+               runtime_files(tmpdir)
+             )
+  end
+
+  defp raw(config, tmpdir, opts \\ []) do
+    Config.add_config(
+      %RawConfig{
+        ifname: "eth1",
+        type: Dnsmasqex,
+        source_config: config,
+        required_ifnames: ["eth1"]
+      },
+      config,
+      [tmpdir: tmpdir] ++ opts
+    )
+  end
+
+  defp runtime_files(tmpdir),
+    do: Enum.map(Config.runtime_options(), &{&1, Config.runtime_path(&1, tmpdir, "eth1")})
+end

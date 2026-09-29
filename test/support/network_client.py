@@ -48,7 +48,7 @@ def exchange(sock, packet, destination, matches):
     raise AssertionError(f"No matching response to message {packet[:8].hex()}")
 
 
-def dhcp4(message, address="0.0.0.0", requested=None, server=None, expected=5):
+def dhcp4(message, address="0.0.0.0", requested=None, server=None, expected=5, vendor=None):
     transaction = os.urandom(4)
     packet = struct.pack("!BBBB4sHH4s4s4s4s16s64s128s", 1, 1, 6, 0,
                          transaction, 0, 0x8000, socket.inet_aton(address),
@@ -56,6 +56,8 @@ def dhcp4(message, address="0.0.0.0", requested=None, server=None, expected=5):
     packet += b"\x63\x82\x53\x63" + bytes([53, 1, message])
     packet += bytes([61, 7, 1]) + MAC + bytes([12, 5]) + b"esp32"
     packet += bytes([55, 5, 1, 3, 6, 15, 51])
+    if vendor:
+        packet += bytes([60, len(vendor)]) + vendor.encode()
     if requested:
         packet += bytes([50, 4]) + socket.inet_aton(requested)
     if server:
@@ -65,8 +67,8 @@ def dhcp4(message, address="0.0.0.0", requested=None, server=None, expected=5):
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_BINDTODEVICE, IFACE.encode() + b"\0")
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
         sock.bind(("0.0.0.0", 68))
-        if message == 7:
-            sock.sendto(packet, (SERVER4, 67))
+        if message in (4, 7):
+            sock.sendto(packet, (SERVER4 if message == 7 else "255.255.255.255", 67))
             return None
         answer = exchange(sock, packet, ("255.255.255.255", 67),
                           lambda data: len(data) >= 240 and data[0] == 2 and data[4:8] == transaction)
@@ -84,16 +86,18 @@ def dhcp4(message, address="0.0.0.0", requested=None, server=None, expected=5):
     return socket.inet_ntoa(answer[16:20]), result
 
 
-def dhcp6(message, server=None, address=None):
+def dhcp6(message, server=None, address=None, rapid=False, temporary=False, status=0):
     transaction = os.urandom(3)
     packet = bytes([message]) + transaction + option6(1, DUID)
     if server:
         packet += option6(2, server)
     if message != 11:
-        association = struct.pack("!III", 42, 0, 0)
+        association = struct.pack("!I", 42) if temporary else struct.pack("!III", 42, 0, 0)
         if address:
             association += option6(5, socket.inet_pton(socket.AF_INET6, address) + bytes(8))
-        packet += option6(3, association)
+        packet += option6(4 if temporary else 3, association)
+    if rapid:
+        packet += option6(14, b"")
     packet += option6(6, struct.pack("!HH", 23, 24))
     packet += option6(39, b"\x00\x07esp32v6\x00")
     index = socket.if_nametoindex(IFACE)
@@ -101,21 +105,21 @@ def dhcp6(message, server=None, address=None):
         sock.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_MULTICAST_IF, index)
         sock.bind(("fe80::2", 546, 0, index))
         answer = exchange(sock, packet, ("ff02::1:2", 547, 0, index),
-                          lambda data: len(data) >= 4 and data[0] == (2 if message == 1 else 7)
+                          lambda data: len(data) >= 4 and data[0] == (2 if message == 1 and not rapid else 7)
                           and data[1:4] == transaction)
     result = options6(answer[4:])
     assert result[1] == DUID
     if 13 in result:
-        assert result[13][:2] == bytes(2), result[13]
+        assert result[13][:2] == struct.pack("!H", status), result[13]
     if server:
         assert result[2] == server
     return result
 
 
-def address6(result):
-    association = result[3]
+def address6(result, temporary=False):
+    association = result[4 if temporary else 3]
     assert struct.unpack("!I", association[:4])[0] == 42
-    nested = options6(association[12:])
+    nested = options6(association[4 if temporary else 12:])
     assert 5 in nested, nested
     addr, preferred, valid = struct.unpack("!16sII", nested[5])
     assert 0 < preferred <= valid <= 600, (preferred, valid)
@@ -200,11 +204,11 @@ def advertisement(mode):
         assert reply[24] == SEARCH
 
 
-def scoped_upstream():
+def scoped_upstream(ipv4=False):
     # Answer only on a link-local address. Forwarding fails if the scope is lost.
     index = socket.if_nametoindex(IFACE)
-    with socket.socket(socket.AF_INET6, socket.SOCK_DGRAM) as upstream:
-        upstream.bind(("fe80::2", 53, 0, index))
+    with socket.socket(socket.AF_INET if ipv4 else socket.AF_INET6, socket.SOCK_DGRAM) as upstream:
+        upstream.bind(("192.0.2.2", 53) if ipv4 else ("fe80::2", 53, 0, index))
         upstream.settimeout(10)
         errors = []
 
@@ -230,11 +234,64 @@ def scoped_upstream():
         assert response[3] & 15 == 0 and response[-4:] == socket.inet_aton("203.0.113.9"), response
 
 
+def advanced_dhcp6():
+    reply = dhcp6(1, rapid=True)
+    assert 14 in reply, "Rapid Commit was not acknowledged"
+    address = address6(reply)
+    confirmed = dhcp6(4, address=address)
+    assert confirmed[13][:2] == bytes(2)
+    rejected = dhcp6(4, address="fd99::100", status=4)
+    assert rejected[13][:2] == b"\x00\x04", "Off-link address was confirmed"
+    dhcp6(9, reply[2], address)
+    next_reply = dhcp6(1, rapid=True)
+    next_address = address6(next_reply)
+    assert next_address != address, "Declined address was immediately reused"
+    dhcp6(8, next_reply[2], next_address)
+    temporary = dhcp6(1, rapid=True, temporary=True)
+    temporary_address = address6(temporary, temporary=True)
+    dhcp6(8, temporary[2], temporary_address, temporary=True)
+
+
+def policy4():
+    offered, offer = dhcp4(1, expected=2, vendor="ESP")
+    address, reply = dhcp4(3, requested=offered, server=socket.inet_ntoa(offer[54]), vendor="ESP")
+    assert address == "192.0.2.105", address
+    assert reply[42] == socket.inet_aton("192.0.2.123"), "Unrequested forced NTP option is missing"
+
+
+def decline4():
+    offered, offer = dhcp4(1, expected=2)
+    address, _ = dhcp4(3, requested=offered, server=socket.inet_ntoa(offer[54]))
+    dhcp4(4, requested=address, server=socket.inet_ntoa(offer[54]))
+    next_address, _ = dhcp4(1, expected=2)
+    assert next_address != address, "Declined IPv4 address was immediately reused"
+
+
+def tftp(filename, expected):
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as client:
+        client.settimeout(3)
+        client.sendto(b"\x00\x01" + filename.encode() + b"\x00octet\x00", (SERVER4, 69))
+        packet, sender = client.recvfrom(2048)
+        assert packet[:4] == b"\x00\x03\x00\x01", packet
+        assert packet[4:] == expected.encode(), packet
+        client.sendto(b"\x00\x04\x00\x01", sender)
+
+
 if __name__ == "__main__":
     action = sys.argv[1]
     if action == "ra":
         advertisement(sys.argv[2])
     elif action == "upstream":
         scoped_upstream()
+    elif action == "resolver-upstream":
+        scoped_upstream(ipv4=True)
+    elif action == "advanced6":
+        advanced_dhcp6()
+    elif action == "policy4":
+        policy4()
+    elif action == "decline4":
+        decline4()
+    elif action == "tftp":
+        tftp(sys.argv[2], sys.argv[3])
     else:
         lease(action, sys.argv[2], sys.argv[3], sys.argv[4] if len(sys.argv) > 4 else SERVER6)
