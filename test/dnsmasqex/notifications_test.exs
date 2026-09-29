@@ -14,7 +14,10 @@ defmodule Dnsmasqex.NotificationsTest do
   @ifname "dnsmasq_test0"
 
   setup %{tmp_dir: tmp_dir} do
-    on_exit(fn -> Notifications.clear(@ifname) end)
+    on_exit(fn ->
+      Notifications.clear(@ifname)
+      PropertyTable.delete(VintageNet, ["interface", @ifname, "addresses"])
+    end)
 
     %{
       context: %{
@@ -35,8 +38,9 @@ defmodule Dnsmasqex.NotificationsTest do
              VintageNet.get(["interface", @ifname, "dnsmasq", "event"])
   end
 
-  test "lease events publish the event and the leases", %{context: context} do
+  test "publishes the updated leases before their event", %{context: context} do
     File.write!(context.lease_path, "0 aa:bb:cc:dd:ee:ff 192.168.24.100 printer *\n")
+    VintageNet.subscribe(["interface", @ifname])
 
     Notifications.dispatch(
       ["add", "aa:bb:cc:dd:ee:ff", "192.168.24.100", "printer"],
@@ -49,6 +53,61 @@ defmodule Dnsmasqex.NotificationsTest do
 
     assert [%{lease_mac: "aa:bb:cc:dd:ee:ff", leasetime: :infinity}] =
              VintageNet.get(["interface", @ifname, "dhcpd", "leases"])
+
+    assert_receive {VintageNet, ["interface", @ifname, first | _], _, _, _}
+    assert first == "dhcpd"
+    assert_receive {VintageNet, ["interface", @ifname, "dnsmasq", "event"], _, %Event{}, _}
+  end
+
+  test "delivers consecutive identical script events without clearing the latest value", %{
+    tmp_dir: tmp_dir
+  } do
+    [_server, notifier, %{start: {_, _, [daemon_args]}}] = raw_config(tmp_dir).child_specs
+    start_supervised!(notifier)
+    property = ["interface", @ifname, "dnsmasq", "event"]
+    VintageNet.subscribe(property)
+    env = daemon_args[:opts][:env]
+    args = ["tftp", "1024", "192.168.24.10", "/boot/firmware.bin"]
+
+    assert {"", 0} = System.cmd(BEAMNotify.bin_path(), args, env: env)
+    assert_receive {VintageNet, ^property, nil, first, _}, 1000
+    assert %Event{name: "tftp", file_size: 1024, file_name: "/boot/firmware.bin"} = first
+    assert {"", 0} = System.cmd(BEAMNotify.bin_path(), args, env: env)
+    assert_receive {VintageNet, ^property, ^first, second, _}, 1000
+    assert is_integer(first.id)
+    assert second.id != first.id
+    assert %{second | id: first.id} == first
+    assert VintageNet.get(property) == second
+    refute_received {VintageNet, ^property, _, nil, _}
+  end
+
+  test "follows live interface prefixes through renumbering and address removal", %{
+    context: context
+  } do
+    property = ["interface", @ifname, "dnsmasq", "event"]
+    addresses = ["interface", @ifname, "addresses"]
+    first = %{address: {0xFD12, 0, 0, 1, 0, 0, 0, 1}, prefix_length: 64}
+    second = %{address: {0xFD12, 0, 0, 2, 0, 0, 0, 1}, prefix_length: 64}
+
+    PropertyTable.put(VintageNet, addresses, [first])
+    Notifications.dispatch(["arp-add", "aa:bb:cc:dd:ee:ff", "fd12:0:0:1::10"], %{}, context)
+    assert %Event{ip: "fd12:0:0:1::10"} = VintageNet.get(property)
+
+    PropertyTable.put(VintageNet, addresses, [second])
+    Notifications.dispatch(["arp-add", "aa:bb:cc:dd:ee:ff", "fd12:0:0:2::10"], %{}, context)
+    assert %Event{ip: "fd12:0:0:2::10"} = latest = VintageNet.get(property)
+
+    for ip <- ["fd12:0:0:1::10", "fd12:0:0:3::10", "192.168.24.10", "fe80::10"] do
+      Notifications.dispatch(["arp-add", "aa:bb:cc:dd:ee:ff", ip], %{}, context)
+      assert VintageNet.get(property) == latest
+    end
+
+    PropertyTable.put(VintageNet, addresses, [])
+
+    for ip <- ["fd12:0:0:2::10", "192.168.24.10"] do
+      Notifications.dispatch(["arp-add", "aa:bb:cc:dd:ee:ff", ip], %{}, context)
+      assert VintageNet.get(property) == latest
+    end
   end
 
   test "configured script reports dnsmasq environment variables", %{

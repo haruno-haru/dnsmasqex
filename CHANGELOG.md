@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+* Give each published event a unique ID so repeated identical hooks notify
+  subscribers, and refresh lease properties before their event is delivered.
+* Follow VintageNet's live interface prefixes when filtering neighbor events,
+  including externally managed IPv6 addresses and withdrawn prefixes.
+* Verify official Ethernet and WiFi configuration composition, and extend Linux
+  network tests for the public VintageNet API, repeated TFTP events and dynamic
+  IPv6 neighbors. Clarify configuration compatibility and event delivery limits.
+
 ## v0.1.2
 
 * Cancel stale restart timers and recover a failed daemon when its runtime

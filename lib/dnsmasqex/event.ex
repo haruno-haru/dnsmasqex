@@ -12,6 +12,8 @@ defmodule Dnsmasqex.Event do
   interface and client address. Other actions only have a `:name`. Fields are `nil` when dnsmasq
   doesn't know them.
 
+  * `:id` - an integer unique to each published event within the current BEAM;
+    `nil` for events returned by `new/2` before publication
   * `:mac` - the client's MAC address
   * `:ip` - the client's IP address
   * `:hostname` - the client's hostname
@@ -66,8 +68,11 @@ defmodule Dnsmasqex.Event do
   alias VintageNet.IP
 
   @enforce_keys [:name]
+  # Keep the published protocol fields compatible with 0.1.2.
+  # credo:disable-for-next-line Credo.Check.Warning.StructFieldAmount
   defstruct [
     :name,
+    :id,
     :mac,
     :ip,
     :hostname,
@@ -102,6 +107,7 @@ defmodule Dnsmasqex.Event do
 
   @type t :: %__MODULE__{
           name: String.t(),
+          id: pos_integer() | nil,
           mac: String.t() | nil,
           ip: String.t() | nil,
           hostname: String.t() | nil,

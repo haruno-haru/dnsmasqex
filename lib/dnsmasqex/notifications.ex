@@ -25,12 +25,13 @@ defmodule Dnsmasqex.Notifications do
   def dispatch(args, env, context) do
     event = Event.new(args, env)
 
-    if on_subnet?(event, context) do
-      PropertyTable.put(VintageNet, event_property(context.ifname), event)
-    end
-
     if event.name in @lease_actions do
       Leases.update(context.ifname, context.lease_path, event)
+    end
+
+    if on_subnet?(event, context) do
+      event = %{event | id: System.unique_integer([:positive, :monotonic])}
+      PropertyTable.put(VintageNet, event_property(context.ifname), event)
     end
 
     :ok
@@ -53,7 +54,9 @@ defmodule Dnsmasqex.Notifications do
         false
 
       {:ok, ip} ->
-        Enum.any?(context.subnets, fn subnet ->
+        subnets = VintageNet.get(["interface", context.ifname, "addresses"], context.subnets)
+
+        Enum.any?(subnets, fn subnet ->
           tuple_size(ip) == tuple_size(subnet.address) and
             IP.to_subnet(ip, subnet.prefix_length) ==
               IP.to_subnet(subnet.address, subnet.prefix_length)

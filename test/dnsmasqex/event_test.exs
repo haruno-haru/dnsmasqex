@@ -9,6 +9,16 @@ defmodule Dnsmasqex.EventTest do
 
   doctest Event
 
+  test "relay snoop reports the client interface and delegated prefix separately" do
+    assert %Event{
+             name: "relay-snoop",
+             interface: "eth1",
+             ip: "fe80::2",
+             delegated_prefix: "2001:db8:1234::/56",
+             mac: nil
+           } = Event.new(["relay-snoop", "eth1", "fe80::2", "2001:db8:1234::/56"], %{})
+  end
+
   test "accepts nonnegative lease durations and ignores invalid values" do
     args = ["add", "aa:bb:cc:dd:ee:ff", "192.168.24.10"]
 

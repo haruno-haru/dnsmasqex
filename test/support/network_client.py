@@ -275,6 +275,18 @@ def decline4():
     assert next_address != address, "Declined IPv4 address was immediately reused"
 
 
+def neighbor6(source):
+    question = b"\x08neighbor\x07example\x00" + struct.pack("!HH", 1, 1)
+    query = struct.pack("!HHHHHH", 1234, 256, 1, 0, 0, 0) + question
+    with socket.socket(socket.AF_INET6, socket.SOCK_DGRAM) as client:
+        client.settimeout(3)
+        client.bind((source, 0))
+        client.sendto(query, (SERVER6, 53))
+        reply, _ = client.recvfrom(2048)
+        identifier, flags = struct.unpack("!HH", reply[:4])
+        assert identifier == 1234 and flags & 0x8000 and flags & 15 == 0, reply
+
+
 def tftp(filename, expected):
     with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as client:
         client.settimeout(3)
@@ -342,6 +354,8 @@ if __name__ == "__main__":
         decline4()
     elif action == "tftp":
         tftp(sys.argv[2], sys.argv[3])
+    elif action == "neighbor6":
+        neighbor6(sys.argv[2])
     elif action == "reservation4":
         reservation4(sys.argv[2])
     elif action == "no-offer4":

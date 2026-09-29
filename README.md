@@ -153,6 +153,15 @@ iex> VintageNet.configure("wlan0", %{
   })
 ```
 
+Keep using `VintageNet.configure/3` with the complete wrapped configuration when
+changing WiFi or Ethernet settings. Their `quick_configure` helpers replace the
+configuration, including the Dnsmasqex wrapper. WiFi commands such as
+`VintageNet.scan/1` still reach the underlying technology.
+
+The common `:start`, `:end`, `:static_leases` and named `:options` follow
+VintageNet's DHCP configuration style. BusyBox-specific settings and raw numeric
+option values need conversion to dnsmasq syntax; the two formats are not interchangeable.
+
 Fixed addresses and names for known clients example:
 
 ```elixir
@@ -537,7 +546,7 @@ technology reports the following:
 Property                | Values                       | Description
 ----------------------- | ---------------------------- | -----------
 `dhcpd/leases`          | `[%{}, ...]`                 | Current IPv4 and IPv6 leases. IPv4 retains VintageNet's `:dhcpd` format. `leasetime` is `:infinity` for infinite leases
-`dnsmasq/event`         | `%Dnsmasqex.Event{}` | The latest lease or neighbor event
+`dnsmasq/event`         | `%Dnsmasqex.Event{}` | The latest lease, neighbor, TFTP or relay snoop event
 `dnsmasq/static_leases` | `[lease, ...]`               | The static leases in use
 `dnsmasq/options`       | `%{option => value}`         | The DHCP options in use
 `dnsmasq/records`       | `[{name, ip}, ...]`          | The records in use
@@ -583,14 +592,16 @@ appear in this list.
 
 ### Events
 
-dnsmasq reports `"add"`, `"old"` and `"del"` when a lease is added, renewed or
-removed, and `"arp-add"` and `"arp-del"` when a client appears or disappears on
-the interface's subnet. It also reports every lease as `"old"` when it starts or
-reloads. An event looks like this:
+dnsmasq reports `"add"`, `"old"` and `"del"` when a lease is added, updated or
+removed, and `"arp-add"` and `"arp-del"` for neighbor table changes. `"old"` also
+reports existing leases at startup or reload, so it does not always mean renewal.
+`"tftp"` reports a completed transfer; `"relay-snoop"` reports a delegated prefix
+observed by a DHCPv6 relay. An event looks like this:
 
 ```elixir
 %Dnsmasqex.Event{
   name: "add",
+  id: 123,
   mac: "e8:f6:0a:e7:1a:8a",
   ip: "192.168.24.100",
   hostname: "esp32",
@@ -616,11 +627,21 @@ See `Dnsmasqex.Event` for all the fields. dnsmasq checks the neighbor
 table at most every 90 seconds, so `"arp-del"` can arrive minutes after a client
 goes away. The interface's `lower_up` property changes as soon as the link does.
 
+Each published event has an `:id` unique within the running BEAM, so consecutive
+identical hooks still notify subscribers. Lease properties are refreshed before
+publishing their event. Subscriptions have no replay or durable delivery, and
+dnsmasq may combine intermediate lease changes before invoking its hook. DNS
+queries and individual DHCP or RA packets are not events on this property.
+
 DHCPv6 events include `:duid`, `:iaid` and `:server_duid`; `:client_id` also
 contains the client DUID. `:mac` is set only when dnsmasq reports it. Neighbor
-events retain their MAC address and include either family on the configured
-subnets. Link-local IPv6 neighbors are excluded because dnsmasq's neighbor
-script arguments do not identify their interface.
+events retain their MAC address and are filtered using VintageNet's current
+interface addresses, including externally managed IPv6 prefixes. Configured
+subnets are used only until VintageNet first reports addresses. Link-local IPv6
+neighbors are excluded because dnsmasq's hook does not identify their interface;
+overlapping subnets on different interfaces cannot be distinguished either.
+DNS-only configurations need `directives: [script_arp: true]` to enable neighbor
+reporting. A neighbor event is not a reliable device connection or disconnection signal.
 
 ## Debugging
 
@@ -639,6 +660,10 @@ Run `mix test`, `mix format --check-formatted`, `mix credo --strict`, and
 Installing dnsmasq enables configuration checks and real DNS queries over
 UDP and TCP. CI tests the distribution's dnsmasq package.
 
+The ordinary suite checks configuration composition with the official Ethernet
+and WiFi libraries, including WiFi AP supervision and generated supplicant files.
+It does not exercise a physical WiFi radio or driver.
+
 The packet tests require Linux, root, `iproute2`, `nftables`, Python 3 and dnsmasq. Run
 them in a fresh network namespace after `mix deps.get` and `mix test`:
 
@@ -655,4 +680,6 @@ isolation between simultaneous interfaces and recovery after link loss, and
 exercise DHCPv6 Confirm, Rapid Commit, temporary addresses, external hosts
 directory updates, TFTP transfers, nftables insertion, custom resolver files,
 scoped upstream forwarding and RA flags, MTU, priority and prefix renumbering.
+They also exercise the public VintageNet API with Ethernet, repeated TFTP event
+delivery and neighbor reporting across externally managed IPv6 prefix changes.
 CI runs these tests; the ordinary test suite excludes them.

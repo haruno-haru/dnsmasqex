@@ -194,14 +194,131 @@ defmodule Dnsmasqex.NetworkIntegrationTest do
     assert client(context, ["decline4"]) == ""
   end
 
-  test "serves a boot file using the system TFTP server", context do
-    File.write!(Path.join(context.tmp_dir, "boot.img"), "esp boot image")
+  test "reports every completed transfer when the same TFTP file is requested twice", context do
+    path = Path.join(context.tmp_dir, "boot.img")
+    File.write!(path, "esp boot image")
+    property = ["interface", @ifname, "dnsmasq", "event"]
+    VintageNet.subscribe(property)
 
     start_server(context, :stateful, %{
       directives: [enable_tftp: true, tftp_root: context.tmp_dir, dhcp_boot: "boot.img"]
     })
 
-    assert client(context, ["tftp", "boot.img", "esp boot image"]) == ""
+    events =
+      for _ <- 1..2 do
+        assert client(context, ["tftp", "boot.img", "esp boot image"]) == ""
+
+        assert_receive {VintageNet, ^property, _,
+                        %Event{name: "tftp", file_name: ^path, file_size: 13} = event, _},
+                       3000
+
+        event
+      end
+
+    [first, second] = events
+    assert first.id != second.id
+    assert %{second | id: first.id} == first
+  end
+
+  test "configures, updates and deconfigures real Ethernet through the public API", context do
+    config = %{
+      type: Dnsmasqex,
+      technology: VintageNetEthernet,
+      ipv4: %{method: :static, address: "192.0.2.1", prefix_length: 24},
+      dnsmasq: %{
+        start: "192.0.2.100",
+        end: "192.0.2.100",
+        name_servers: [],
+        authoritative: true
+      }
+    }
+
+    on_exit(fn ->
+      VintageNet.deconfigure(@ifname, persist: false)
+      eventually(fn -> VintageNet.get(["interface", @ifname, "dnsmasq", "status"]) == nil end)
+    end)
+
+    assert :ok = VintageNet.configure(@ifname, config, persist: false)
+
+    eventually(fn ->
+      match?(%{state: :running}, VintageNet.get(["interface", @ifname, "dnsmasq", "status"]))
+    end)
+
+    assert %{type: Dnsmasqex, technology: VintageNetEthernet} =
+             VintageNet.get_configuration(@ifname)
+
+    assert client(context, ["reservation4", "192.0.2.100"]) == ""
+    assert :ok = VintageNet.ioctl(@ifname, :put_record, [{"api.lan", "192.0.2.123"}])
+    eventually(fn -> resolve("api.lan", :a) == [{192, 0, 2, 123}] end)
+    assert {:error, :unsupported} = VintageNet.ioctl(@ifname, :unsupported_command)
+
+    assert :ok = VintageNet.deconfigure(@ifname, persist: false)
+    eventually(fn -> VintageNet.get(["interface", @ifname, "dnsmasq", "status"]) == nil end)
+    assert VintageNet.get(["interface", @ifname, "dhcpd", "leases"]) == nil
+  end
+
+  test "reports IPv6 neighbors as an externally managed prefix changes", context do
+    upstream = start_supervised!({DNSStub, owner: self()})
+    port = DNSStub.port(upstream)
+    context = Map.put(context, :ipv6, %{method: :manual})
+    property = ["interface", @ifname, "dnsmasq", "event"]
+    VintageNet.subscribe(property)
+
+    start_server(context, :native, %{
+      name_servers: ["127.0.0.1##{port}"],
+      listen_mode: :interface,
+      cache_size: 0,
+      options6: %{},
+      directives: [script_arp: true, add_mac: true]
+    })
+
+    for prefix <- [1, 2] do
+      server = "fd12:3456:789a:#{prefix}::1"
+      neighbor = "fd12:3456:789a:#{prefix}::2"
+      {:ok, address} = VintageNet.IP.ip_to_tuple(server)
+      ip(["-6", "addr", "add", "#{server}/64", "dev", @ifname, "nodad"])
+
+      ip([
+        "-n",
+        context.namespace,
+        "-6",
+        "addr",
+        "add",
+        "#{neighbor}/64",
+        "dev",
+        @client,
+        "nodad"
+      ])
+
+      ip(["-6", "neigh", "replace", neighbor, "lladdr", "02:00:00:00:00:02", "dev", @ifname])
+
+      eventually(fn ->
+        Enum.any?(
+          VintageNet.get(["interface", @ifname, "addresses"], []),
+          &(&1.address == address)
+        )
+      end)
+
+      eventually(fn ->
+        :inet_res.lookup(
+          ~c"ready.example",
+          :in,
+          :a,
+          [nameservers: [{address, 53}], timeout: 100, retry: 1],
+          500
+        ) == [{203, 0, 113, 9}]
+      end)
+
+      # A query with add-mac refreshes dnsmasq's neighbor cache without its 90-second poll.
+      assert client(Map.put(context, :server6, server), ["neighbor6", neighbor]) == ""
+
+      assert_receive {VintageNet, ^property, _,
+                      %Event{name: "arp-add", ip: ^neighbor, mac: "02:00:00:00:00:02"}, _},
+                     3000
+
+      ip(["-6", "addr", "del", "#{server}/64", "dev", @ifname])
+      ip(["-n", context.namespace, "-6", "addr", "del", "#{neighbor}/64", "dev", @client])
+    end
   end
 
   test "writes real A and AAAA answers into the selected nftables sets", context do
