@@ -183,6 +183,8 @@ defmodule Dnsmasqex.Directives do
              :pxe_service,
              :pxe_prompt,
              :read_ethers,
+             :script_arp,
+             :script_on_renewal,
              :leasequery
            ])
     end)

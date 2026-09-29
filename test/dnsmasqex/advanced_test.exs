@@ -197,6 +197,7 @@ defmodule Dnsmasqex.AdvancedTest do
   } do
     for directives <- [
           [dhcp_relay: "192.0.2.1,192.0.2.254"],
+          [script_arp: true],
           [enable_tftp: true, dhcp_boot: "boot.img"],
           [dhcp_range: "192.0.2.0,proxy"]
         ] do

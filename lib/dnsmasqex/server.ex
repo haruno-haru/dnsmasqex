@@ -163,9 +163,8 @@ defmodule Dnsmasqex.Server do
 
   defp change(:directives, [value], state) do
     normalized = Config.normalize_value(state.config, :directives, value)
-    next = put_in(state.config, [:dnsmasq, :directives], normalized)
     original = state.config.dnsmasq
-    updated = next.dnsmasq
+    updated = Map.put(original, :directives, normalized)
 
     if Config.dhcp_services?(original) != Config.dhcp_services?(updated) or
          Config.dhcp_enabled?(original) != Config.dhcp_enabled?(updated) or
@@ -185,9 +184,7 @@ defmodule Dnsmasqex.Server do
               :records,
               :static_leases6,
               :options6,
-              :upstreams,
-              :dhcp_hosts,
-              :dhcp_options
+              :upstreams
             ],
        do: {:ok, option, normalize(state, option, value)}
 

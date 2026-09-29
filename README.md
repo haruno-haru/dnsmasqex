@@ -475,8 +475,9 @@ dnsmasq: %{name_servers: [], upstreams: [server: "127.0.0.1#5353"]}
 VintageNet.ioctl("eth1", :upstreams, [[server: "127.0.0.1#5354"]])
 ```
 
-Native directives that change whether DHCP or RA runs, or change native user
-selection, require `VintageNet.configure/2`; the update API returns
+Updates that change address-allocation roles, switch between generated and native
+pools, change whether DHCP or RA runs, or change native user selection require
+`VintageNet.configure/2`; the update API returns
 `{:error, :requires_interface_reconfiguration}`. This keeps generated startup
 files and interface binding consistent. A native-record update through
 `:directives` briefly restarts DNS; ordinary `:records` updates do not.
@@ -647,9 +648,9 @@ sudo env "PATH=$PATH" "MIX_HOME=$HOME/.mix" "HEX_HOME=$HOME/.hex" MIX_ENV=test D
 They create a separate client namespace connected by a virtual Ethernet pair,
 use the generated configuration and supervised processes, and verify DHCPv4
 and DHCPv6 allocation, renewal, release, decline, pool exhaustion, client-ID
-policies, forced options, lease persistence and server DUID stability. They also
-verify isolation between simultaneous interfaces and recovery after link loss,
-exercise DHCPv6 Confirm, Rapid Commit and temporary addresses, external hosts
+policies, forced options, lease persistence and server DUID stability. They verify
+isolation between simultaneous interfaces and recovery after link loss, and
+exercise DHCPv6 Confirm, Rapid Commit, temporary addresses, external hosts
 directory updates, TFTP transfers, nftables insertion, custom resolver files,
 scoped upstream forwarding and RA flags, MTU, priority and prefix renumbering.
 CI runs these tests; the ordinary test suite excludes them.
